@@ -1,0 +1,11 @@
+streamlit>=1.50
+pandas>=2.1
+sqlalchemy>=2.0
+sqlglot>=25.0
+openai>=1.40
+plotly>=5.20
+python-dotenv>=1.0
+openpyxl>=3.1        # Excel uploads
+pymysql>=1.1         # MySQL / MariaDB
+psycopg2-binary>=2.9 # PostgreSQL
+pytest>=8.0

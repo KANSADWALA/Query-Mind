@@ -1,0 +1,104 @@
+{
+  "_comment": "Catalog of ready-to-use real datasets. Add your own entries here (or from the app sidebar). kind = sqlite | csv | excel. For csv/excel, each file becomes a table.",
+  "datasets": [
+    {
+      "id": "chinook",
+      "name": "Chinook — digital music store",
+      "kind": "sqlite",
+      "url": "https://github.com/lerocha/chinook-database/releases/download/v1.4.5/Chinook_Sqlite.sqlite",
+      "file": "chinook.sqlite",
+      "description": "Real-world-style iTunes store: artists, albums, tracks, genres, playlists, customers, employees and invoices (2009–2013). 11 tables.",
+      "source": "https://github.com/lerocha/chinook-database",
+      "license": "MIT",
+      "examples": [
+        "Which 5 artists have generated the most revenue?",
+        "Show total sales by year",
+        "Which countries have the most customers, and how much do they spend?",
+        "Which sales support agent brought in the most revenue?"
+      ]
+    },
+    {
+      "id": "northwind",
+      "name": "Northwind — trading company",
+      "kind": "sqlite",
+      "url": "https://raw.githubusercontent.com/jpwhite3/northwind-SQLite3/main/dist/northwind.db",
+      "file": "northwind.db",
+      "description": "Classic Microsoft sample for a food import/export business: customers, orders, order details (600k+ lines), products, suppliers, employees, shippers, territories.",
+      "source": "https://github.com/jpwhite3/northwind-SQLite3",
+      "license": "See source repository",
+      "examples": [
+        "What are the top 10 best-selling products by revenue?",
+        "Show monthly order count for the last 2 years in the data",
+        "Which employee handled the most orders?",
+        "Which suppliers provide products in the Beverages category?"
+      ]
+    },
+    {
+      "id": "sakila",
+      "name": "Sakila — DVD rental chain",
+      "kind": "sqlite",
+      "url": "https://raw.githubusercontent.com/bradleygrant/sakila-sqlite3/main/sakila_master.db",
+      "file": "sakila.db",
+      "description": "MySQL's official sample database ported to SQLite: films, actors, categories, inventory, stores, staff, customers, rentals and payments.",
+      "source": "https://github.com/bradleygrant/sakila-sqlite3",
+      "license": "BSD (MySQL Sakila sample)",
+      "examples": [
+        "Which film categories earn the most rental revenue?",
+        "Who are the 10 most frequently rented actors?",
+        "Compare revenue between the two stores by month",
+        "Which customers have rented more than 40 films?"
+      ]
+    },
+    {
+      "id": "titanic",
+      "name": "Titanic passengers",
+      "kind": "csv",
+      "files": [
+        {"url": "https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv", "table": "passengers"}
+      ],
+      "description": "Passenger list of the RMS Titanic (891 passengers): class, sex, age, fare, port of embarkation and survival.",
+      "source": "https://github.com/datasciencedojo/datasets",
+      "license": "See source repository",
+      "examples": [
+        "What was the survival rate by passenger class and sex?",
+        "What is the age distribution of passengers?",
+        "Did passengers who paid higher fares survive more often?",
+        "How many passengers embarked from each port?"
+      ]
+    },
+    {
+      "id": "covid_latest",
+      "name": "COVID-19 by country (Our World in Data)",
+      "kind": "csv",
+      "files": [
+        {"url": "https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/latest/owid-covid-latest.csv", "table": "covid_latest"}
+      ],
+      "description": "Latest cumulative COVID-19 cases, deaths, vaccinations, population and development indicators per country and region.",
+      "source": "https://github.com/owid/covid-19-data",
+      "license": "CC BY 4.0",
+      "examples": [
+        "Which 10 countries had the highest deaths per million?",
+        "Compare total cases per million across continents",
+        "Is there a relationship between GDP per capita and vaccination rate?",
+        "Show India's key COVID figures"
+      ]
+    },
+    {
+      "id": "tips",
+      "name": "Restaurant tips",
+      "kind": "csv",
+      "files": [
+        {"url": "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/tips.csv", "table": "tips"}
+      ],
+      "description": "Bills and tips recorded by a waiter: total bill, tip, party size, day, time, smoker.",
+      "source": "https://github.com/mwaskom/seaborn-data",
+      "license": "BSD-3-Clause",
+      "examples": [
+        "What is the average tip percentage by day?",
+        "Do smokers tip more than non-smokers?",
+        "How does tip amount relate to bill size?",
+        "Which party size has the highest average bill?"
+      ]
+    }
+  ]
+}

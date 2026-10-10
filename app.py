@@ -1,1632 +1,870 @@
-"""
-app.py — QueryMind v2 · Full-featured Conversational SQL Assistant
+"""QueryMind — an intelligent, context-aware database assistant (Streamlit UI).
 
-Fixes applied:
-  #1  Healed df now correctly rebuilt from healed query rows
-  #2  healed flag set correctly in _handle_pending
-  #5  Enter key submits via st.form
-  #6  Sidebar examples auto-submit via auto_submit flag
-  #9  Excel bytes built lazily (only on download click)
-  #12 SQL copy button added
-  #13 Bookmarks use in-memory list (no extra disk reads)
-  #14 zero_rows_hint shown when query returns 0 rows
-  #17 Auto-save after every message; autosave restore on startup
+Run:  streamlit run app.py
 """
-
 from __future__ import annotations
-import io
+
 import os
-import time
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
+from sqlalchemy.engine import URL
 
-from database    import init_db, DB_PATH, DatabaseManager
-from agent       import ConversationalSQLAgent, MODIFICATION_META, AgentResponse
-from charts      import build_chart, chart_type_label
-from persistence import (save_session, list_sessions, load_session, delete_session,
-                          load_bookmarks, add_bookmark, remove_bookmark,
-                          auto_save_session, load_autosave, has_autosave)
-
-load_dotenv()
-
-# ── Page config ────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="QueryMind",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded",
+from core.agent import SQLAgent
+from core.charts import CHART_LABELS, PLOTLY_CONFIG, build_figure, chart_options, suggest_chart
+from core.config import PROVIDERS, SESSIONS_DIR, UPLOADS_DIR, Settings, key_setup_hint
+from core.db import DatabaseManager
+from core.examples import ExampleStore
+from core.llm import LLMError, OpenAICompatibleLLM, is_reasoning_model
+from core.memory import Conversation, Turn
+from core.sources import (
+    ConnectionStore, DatasetCatalog, SavedConnection, frames_to_sqlite, kind_from_url,
+    read_table_file, slugify, sqlite_url,
 )
-
-# ── CSS ────────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
-:root {
-  --bg:#0d0f14; --surface:#141720; --surface2:#1c2030; --border:#252a3a;
-  --accent:#7c6af7; --accent2:#4af0c8; --text:#e2e8f0; --muted:#64748b;
-  --code-bg:#0a0c10; --success:#10b981; --warn:#f59e0b; --error:#ef4444;
-}
-html,body,[data-testid="stAppViewContainer"]{background:var(--bg)!important;
-  font-family:'Space Grotesk',sans-serif;color:var(--text);}
-[data-testid="stSidebar"]{background:var(--surface)!important;border-right:1px solid var(--border);}
-#MainMenu,footer,header{visibility:hidden;}
-[data-testid="stToolbar"]{display:none;}
-
-/* Header */
-.qm-header{display:flex;align-items:center;gap:14px;padding:20px 0 8px;
-  border-bottom:1px solid var(--border);margin-bottom:24px;}
-.qm-logo{font-size:2rem;background:linear-gradient(135deg,var(--accent),var(--accent2));
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-.qm-title{font-size:1.5rem;font-weight:700;letter-spacing:-.02em;color:var(--text);margin:0;}
-.qm-sub{font-size:.75rem;color:var(--muted);font-family:'JetBrains Mono',monospace;margin:0;}
-
-/* Chat bubbles */
-.msg-user{display:flex;justify-content:flex-end;margin:10px 0;}
-.msg-user-bubble{background:linear-gradient(135deg,#312e81,#1e1b4b);border:1px solid #4338ca;
-  border-radius:18px 18px 4px 18px;padding:11px 16px;max-width:75%;font-size:.91rem;color:#e0e7ff;}
-.msg-ai{display:flex;justify-content:flex-start;margin:10px 0;}
-.msg-ai-inner{max-width:93%;background:var(--surface2);border:1px solid var(--border);
-  border-radius:4px 18px 18px 18px;padding:13px 16px;}
-.msg-ai-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:9px;}
-
-/* Badges */
-.mod-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;
-  font-size:.7rem;font-weight:600;font-family:'JetBrains Mono',monospace;
-  letter-spacing:.04em;text-transform:uppercase;}
-.cte-badge{background:rgba(74,240,200,.12);border:1px solid rgba(74,240,200,.3);
-  color:#4af0c8;padding:2px 8px;border-radius:10px;font-size:.68rem;
-  font-family:'JetBrains Mono',monospace;}
-.heal-badge{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);
-  color:#34d399;padding:2px 8px;border-radius:10px;font-size:.68rem;
-  font-family:'JetBrains Mono',monospace;}
-
-/* Confidence bar */
-.conf-row{display:flex;align-items:center;gap:8px;margin-top:4px;}
-.conf-bar-bg{flex:1;height:4px;background:#1c2030;border-radius:2px;max-width:120px;}
-.conf-bar{height:4px;border-radius:2px;}
-.conf-lbl{font-size:.7rem;font-family:'JetBrains Mono',monospace;color:var(--muted);}
-
-/* SQL block */
-.sql-block{background:var(--code-bg);border:1px solid var(--border);
-  border-left:3px solid var(--accent);border-radius:8px;padding:13px 15px;
-  font-family:'JetBrains Mono',monospace;font-size:.81rem;color:#a5f3fc;
-  white-space:pre-wrap;word-break:break-word;margin:7px 0;}
-.sql-explanation{font-size:.84rem;color:#94a3b8;margin:5px 0;line-height:1.5;}
-
-/* Chips */
-.changes-row{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px;}
-.change-chip{background:rgba(124,106,247,.1);border:1px solid rgba(124,106,247,.3);
-  color:#c4b5fd;border-radius:12px;padding:2px 9px;font-size:.73rem;
-  font-family:'JetBrains Mono',monospace;}
-
-/* Context note */
-.ctx-note{background:rgba(74,240,200,.05);border:1px solid rgba(74,240,200,.18);
-  border-radius:7px;padding:7px 11px;font-size:.76rem;color:#6ee7b7;margin-top:7px;
-  font-family:'JetBrains Mono',monospace;}
-
-/* Ambiguity */
-.amb-box{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.3);
-  border-radius:8px;padding:10px 14px;color:#fbbf24;font-size:.84rem;margin:8px 0;}
-
-/* Zero rows hint */
-.zero-hint{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.25);
-  border-radius:8px;padding:9px 13px;color:#fcd34d;font-size:.8rem;
-  font-family:'JetBrains Mono',monospace;margin:7px 0;}
-
-/* Error */
-.err-block{background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.28);
-  border-radius:8px;padding:9px 13px;color:#fca5a5;font-size:.82rem;
-  font-family:'JetBrains Mono',monospace;margin:7px 0;}
-
-/* Result */
-.result-hdr{font-size:.76rem;color:var(--muted);font-family:'JetBrains Mono',monospace;
-  margin:10px 0 3px;display:flex;align-items:center;gap:7px;}
-.result-cnt{background:rgba(16,185,129,.13);border:1px solid rgba(16,185,129,.28);
-  color:#34d399;padding:2px 8px;border-radius:10px;font-size:.7rem;}
-.no-result{color:#f59e0b;font-size:.78rem;font-family:'JetBrains Mono',monospace;
-  margin:8px 0;padding:8px 12px;background:rgba(245,158,11,.07);
-  border:1px solid rgba(245,158,11,.2);border-radius:7px;}
-
-/* Plan */
-.plan-block{background:var(--code-bg);border:1px solid var(--border);border-radius:7px;
-  padding:10px 13px;font-family:'JetBrains Mono',monospace;font-size:.74rem;
-  color:#64748b;white-space:pre-wrap;}
-
-/* Input */
-.stTextInput>div>div>input{background:var(--surface2)!important;
-  border:1px solid var(--border)!important;border-radius:12px!important;
-  color:var(--text)!important;font-family:'Space Grotesk',sans-serif!important;
-  font-size:.92rem!important;padding:13px 17px!important;}
-.stTextInput>div>div>input:focus{border-color:var(--accent)!important;
-  box-shadow:0 0 0 2px rgba(124,106,247,.18)!important;}
-.stTextArea textarea{background:var(--surface2)!important;border:1px solid var(--border)!important;
-  color:var(--text)!important;font-family:'JetBrains Mono',monospace!important;font-size:.8rem!important;}
-
-/* Form — remove default border/padding Streamlit adds */
-[data-testid="stForm"]{border:none!important;padding:0!important;}
-
-/* Buttons */
-.stButton>button{background:linear-gradient(135deg,var(--accent),#5b4bd4)!important;
-  color:#fff!important;border:none!important;border-radius:9px!important;
-  font-family:'Space Grotesk',sans-serif!important;font-weight:600!important;
-  transition:opacity .2s!important;}
-.stButton>button:hover{opacity:.86!important;}
-
-/* Stat cards */
-.stat-row{display:flex;gap:8px;margin:14px 0;}
-.stat-card{flex:1;background:var(--surface2);border:1px solid var(--border);
-  border-radius:10px;padding:11px;text-align:center;}
-.stat-val{font-size:1.5rem;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-.stat-lbl{font-size:.68rem;color:var(--muted);margin-top:1px;}
-
-/* Sidebar section label */
-.sb-sec{font-size:.68rem;font-family:'JetBrains Mono',monospace;color:var(--muted);
-  text-transform:uppercase;letter-spacing:.08em;margin:16px 0 6px;}
-
-/* Schema tree */
-.schema-tbl{font-size:.76rem;color:#7c6af7;font-family:'JetBrains Mono',monospace;
-  font-weight:600;margin:6px 0 2px;}
-.schema-col{font-size:.72rem;color:#64748b;font-family:'JetBrains Mono',monospace;
-  padding-left:12px;}
-.schema-type{color:#4af0c8;}
-
-/* DB badge */
-.db-badge{background:rgba(124,106,247,.1);border:1px solid rgba(124,106,247,.25);
-  border-radius:8px;padding:5px 10px;font-size:.72rem;color:#a78bfa;
-  font-family:'JetBrains Mono',monospace;margin-bottom:8px;}
-
-/* Dataframe */
-[data-testid="stDataFrame"]{border-radius:8px;border:1px solid var(--border)!important;overflow:hidden;}
-
-/* Autosave banner */
-.autosave-banner{background:rgba(74,240,200,.07);border:1px solid rgba(74,240,200,.2);
-  border-radius:8px;padding:9px 14px;font-size:.78rem;color:#6ee7b7;margin-bottom:12px;
-  font-family:'JetBrains Mono',monospace;}
-</style>
-""", unsafe_allow_html=True)
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _hex_rgb(h: str) -> str:
-    h = h.lstrip("#")
-    return ",".join(str(int(h[i:i+2], 16)) for i in (0, 2, 4))
-
-
-def _mod_badge(mod: str) -> str:
-    m = MODIFICATION_META.get(mod, MODIFICATION_META["new"])
-    c, icon, label = m["color"], m["icon"], m["label"]
-    return (f"<span class='mod-badge' style='background:rgba({_hex_rgb(c)},.14);"
-            f"border:1px solid rgba({_hex_rgb(c)},.35);color:{c}'>{icon} {label}</span>")
-
-
-def _conf_bar(conf: float) -> str:
-    pct   = int(conf * 100)
-    color = "#10b981" if pct >= 80 else "#f59e0b" if pct >= 60 else "#ef4444"
-    return (f"<div class='conf-row'>"
-            f"<span class='conf-lbl'>confidence</span>"
-            f"<div class='conf-bar-bg'><div class='conf-bar' "
-            f"style='width:{pct}%;background:{color}'></div></div>"
-            f"<span class='conf-lbl'>{pct}%</span></div>")
-
-
-def _csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode()
-
-
-def _xlsx_bytes(df: pd.DataFrame) -> bytes:
-    """FIX #9: Called lazily only when user clicks download — not on every render."""
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df.to_excel(w, index=False)
-    return buf.getvalue()
-
-
-# ── Session-state init ─────────────────────────────────────────────────────────
-
-def _init_state():
-    if "db_manager" not in st.session_state:
-        dm = DatabaseManager()
-        with st.spinner("Initialising database…"):
-            init_db(DB_PATH)
-        st.session_state.db_manager = dm
-
-    if "agent" not in st.session_state:
-        dm = st.session_state.db_manager
-        st.session_state.agent = ConversationalSQLAgent(
-            schema  = dm.get_schema_description(),
-            api_key = os.environ.get("GROQ_API_KEY"),
-        )
-
-    defaults = {
-        "chat_log":        [],
-        "bookmarks":       load_bookmarks(),
-        "show_charts":     True,
-        "show_plan":       False,
-        "prefill":         "",
-        "auto_submit":     False,   # FIX #6: flag for sidebar example auto-submit
-        "session_name":    "",
-        "autosave_prompted": False,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-# ── Pending operations ─────────────────────────────────────────────────────────
-
-def _handle_pending():
-    # Re-run with edited SQL
-    if "rerun_idx" in st.session_state:
-        i   = st.session_state.pop("rerun_idx")
-        sql = st.session_state.pop(f"rerun_sql_{i}", None)
-        if sql and i < len(st.session_state.chat_log):
-            _execute_and_update(i, sql)
-
-    # Auto-heal SQL
-    if "heal_idx" in st.session_state:
-        i = st.session_state.pop("heal_idx")
-        if i < len(st.session_state.chat_log):
-            entry  = st.session_state.chat_log[i]
-            healed = st.session_state.agent.self_heal_sql(
-                entry["current_sql"], entry["db_error"] or "Unknown error"
-            )
-            if not healed.error and healed.sql:
-                entry["response"].sql          = healed.sql
-                entry["response"].explanation  = healed.explanation
-                entry["response"].changes_made = healed.changes_made
-                entry["response"].context_notes= healed.context_notes
-                entry["current_sql"]           = healed.sql
-                entry["healed"]                = True  # FIX #2: was missing
-                _execute_and_update(i, healed.sql, update_resp=False)
-
-    # Bookmark toggle — FIX #13: pass current in-memory list
-    if "bm_toggle_idx" in st.session_state:
-        i = st.session_state.pop("bm_toggle_idx")
-        if i < len(st.session_state.chat_log):
-            entry = st.session_state.chat_log[i]
-            resp  = entry["response"]
-            if entry.get("bookmarked"):
-                st.session_state.bookmarks = remove_bookmark(
-                    resp.sql, current=st.session_state.bookmarks
-                )
-                entry["bookmarked"] = False
-            else:
-                st.session_state.bookmarks = add_bookmark(
-                    entry["user"], resp.sql, resp.explanation,
-                    current=st.session_state.bookmarks
-                )
-                entry["bookmarked"] = True
-
-
-def _execute_and_update(i: int, sql: str, update_resp: bool = True):
-    entry = st.session_state.chat_log[i]
-    dm    = st.session_state.db_manager
-    rows, cols, db_err = dm.run_query(sql)
-    # FIX #1: always rebuild df correctly from the (possibly healed) query result
-    if not db_err and rows:
-        df = pd.DataFrame(rows, columns=cols)
-    elif not db_err:
-        df = pd.DataFrame()
-    else:
-        df = None
-    entry["current_sql"] = sql
-    entry["df"]          = df
-    entry["db_error"]    = db_err
-    if update_resp:
-        entry["response"].sql = sql
-    entry["plan"] = dm.get_execution_plan(sql) if not db_err else None
-
-
-# ── Sidebar ────────────────────────────────────────────────────────────────────
-
-def render_sidebar():
-    agent: ConversationalSQLAgent = st.session_state.agent
-    dm:    DatabaseManager        = st.session_state.db_manager
-
-    with st.sidebar:
-        st.markdown("""
-<div style='text-align:center;padding:8px 0 16px'>
-  <div style='font-size:2rem'>🧠</div>
-  <div style='font-weight:700;font-size:1.05rem;letter-spacing:-.01em'>QueryMind v2</div>
-  <div style='font-size:.68rem;color:#64748b;font-family:JetBrains Mono'>
-    Groq · llama-3.3-70b-versatile
-  </div>
-</div>""", unsafe_allow_html=True)
-
-        # ── API key ──────────────────────────────────────────────────────────
-        st.markdown("<div class='sb-sec'>API Key</div>", unsafe_allow_html=True)
-        key = st.text_input("Groq API Key", value=os.environ.get("GROQ_API_KEY",""),
-                            type="password", placeholder="gsk_…",
-                            label_visibility="collapsed")
-        if key and key != os.environ.get("GROQ_API_KEY",""):
-            os.environ["GROQ_API_KEY"] = key
-            st.session_state.pop("agent", None)
-            st.rerun()
-
-        # ── Stats ────────────────────────────────────────────────────────────
-        n_q = len(st.session_state.chat_log)
-        n_t = agent.turn_count
-        n_r = agent.calls_used
-        st.markdown(f"""
-<div class='stat-row'>
-  <div class='stat-card'><div class='stat-val'>{n_t}</div><div class='stat-lbl'>Turns</div></div>
-  <div class='stat-card'><div class='stat-val'>{n_q}</div><div class='stat-lbl'>Queries</div></div>
-  <div class='stat-card'><div class='stat-val'>{n_r}/25</div><div class='stat-lbl'>API/min</div></div>
-</div>""", unsafe_allow_html=True)
-
-        # ── Database ─────────────────────────────────────────────────────────
-        st.markdown("<div class='sb-sec'>Database</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='db-badge'>📦 {dm.label}</div>",
-                    unsafe_allow_html=True)
-
-        db_tab, upload_tab, ext_tab = st.tabs(["Default", "Upload", "External"])
-
-        with db_tab:
-            if st.button("Use E-Commerce DB", use_container_width=True):
-                dm.use_default()
-                agent.update_schema(dm.get_schema_description())
-                st.session_state.chat_log = []
-                agent.reset()
-                st.rerun()
-
-        with upload_tab:
-            uploaded = st.file_uploader(
-                "CSV / XLSX / SQLite",
-                type=["csv","xlsx","xls","db","sqlite","sqlite3"],
-                label_visibility="collapsed",
-            )
-            if uploaded:
-                key_u = f"upload_{uploaded.name}_{uploaded.size}"
-                if st.session_state.get("last_upload_key") != key_u:
-                    ok, msg = dm.upload_file(uploaded.read(), uploaded.name)
-                    st.session_state["last_upload_key"] = key_u
-                    if ok:
-                        agent.update_schema(dm.get_schema_description())
-                        st.session_state.chat_log = []
-                        agent.reset()
-                        st.toast(f"✅ {msg}")
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-        with ext_tab:
-            conn_str = st.text_input(
-                "Connection string",
-                placeholder="postgresql://user:pass@host:5432/db",
-                label_visibility="collapsed",
-            )
-            if st.button("Connect", use_container_width=True) and conn_str:
-                ok, msg = dm.connect_external(conn_str)
-                if ok:
-                    agent.update_schema(dm.get_schema_description())
-                    st.session_state.chat_log = []
-                    agent.reset()
-                    st.toast(f"✅ {msg}")
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-        # ── Settings ─────────────────────────────────────────────────────────
-        st.markdown("<div class='sb-sec'>Display</div>", unsafe_allow_html=True)
-        st.session_state.show_charts = st.toggle("Auto-charts",
-                                                  value=st.session_state.show_charts)
-        st.session_state.show_plan   = st.toggle("Execution plan",
-                                                  value=st.session_state.show_plan)
-
-        # ── Examples — FIX #6: set auto_submit=True so main() submits immediately
-        st.markdown("<div class='sb-sec'>Examples</div>", unsafe_allow_html=True)
-        examples = [
-            "Show total revenue by product category",
-            "Also include the number of orders",
-            "Now only for Electronics",
-            "Group it by month instead",
-            "Include all years not just 2023",
-            "Which of those products have rating above 4?",
-            "Show the top 5 customers by total spend",
-            "What is the average order value per region?",
-            "Find products with stock below 100",
-        ]
-        for ex in examples:
-            if st.button(ex, key=f"ex_{ex[:18]}", use_container_width=True):
-                st.session_state.prefill      = ex
-                st.session_state.auto_submit  = True
-                st.rerun()
-
-        # ── Query history ─────────────────────────────────────────────────────
-        if st.session_state.chat_log:
-            st.markdown("<div class='sb-sec'>Query History</div>",
-                        unsafe_allow_html=True)
-            for j, entry in enumerate(reversed(st.session_state.chat_log[-10:])):
-                label = entry["user"][:45] + ("…" if len(entry["user"]) > 45 else "")
-                if st.button(f"↩ {label}", key=f"hist_{j}", use_container_width=True):
-                    st.session_state.prefill = entry["user"]
-                    st.rerun()
-
-        # ── Bookmarks ─────────────────────────────────────────────────────────
-        bm = st.session_state.bookmarks
-        if bm:
-            st.markdown("<div class='sb-sec'>Bookmarks</div>", unsafe_allow_html=True)
-            for j, b in enumerate(bm[:8]):
-                lbl = b["question"][:40] + ("…" if len(b["question"]) > 40 else "")
-                if st.button(f"⭐ {lbl}", key=f"bm_{j}", use_container_width=True):
-                    st.session_state.prefill = b["question"]
-                    st.rerun()
-
-        # ── Schema explorer ───────────────────────────────────────────────────
-        st.markdown("<div class='sb-sec'>Schema Explorer</div>",
-                    unsafe_allow_html=True)
-        with st.expander("View tables & columns", expanded=False):
-            tree = dm.get_schema_tree()
-            if tree:
-                parts = []
-                for tbl, cols in tree.items():
-                    parts.append(f"<div class='schema-tbl'>▸ {tbl}</div>")
-                    for c in cols:
-                        parts.append(
-                            f"<div class='schema-col'>{c['name']} "
-                            f"<span class='schema-type'>({c['type']})</span></div>"
-                        )
-                st.markdown("".join(parts), unsafe_allow_html=True)
-                for tbl in tree:
-                    if st.button(f"Sample {tbl}", key=f"smpl_{tbl}",
-                                 use_container_width=True):
-                        st.session_state.prefill     = f"Show me 5 sample rows from {tbl}"
-                        st.session_state.auto_submit = True
-                        st.rerun()
-
-        # ── Sessions ──────────────────────────────────────────────────────────
-        st.markdown("<div class='sb-sec'>Sessions</div>", unsafe_allow_html=True)
-        with st.expander("Save / Load", expanded=False):
-            sname = st.text_input("Session name", placeholder="my-analysis",
-                                  label_visibility="collapsed")
-            if st.button("💾 Save session", use_container_width=True):
-                if st.session_state.chat_log:
-                    slug = save_session(st.session_state.chat_log, sname or None)
-                    st.toast(f"✅ Saved as '{slug}'")
-                else:
-                    st.warning("Nothing to save yet.")
-
-            sessions = list_sessions()
-            if sessions:
-                options = {f"{s['name']} ({s['turns']} turns)": s["filename"]
-                           for s in sessions}
-                chosen = st.selectbox("Load session", list(options.keys()),
-                                      label_visibility="collapsed")
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("📂 Load", use_container_width=True):
-                        log = load_session(options[chosen])
-                        st.session_state.chat_log = log
-                        agent.reset()
-                        st.toast(f"✅ Loaded '{chosen}'")
-                        st.rerun()
-                with c2:
-                    if st.button("🗑 Delete", use_container_width=True):
-                        delete_session(options[chosen])
-                        st.toast("Deleted.")
-                        st.rerun()
-
-        # ── Reset ─────────────────────────────────────────────────────────────
-        st.markdown("<hr style='border-color:#252a3a;margin:16px 0'>",
-                    unsafe_allow_html=True)
-        if st.button("🔄 Reset conversation", use_container_width=True):
-            agent.reset()
-            st.session_state.chat_log = []
-            st.session_state.pop("last_upload_key", None)
-            st.rerun()
-
-
-# ── Message renderer ───────────────────────────────────────────────────────────
-
-def render_message(i: int, entry: dict):
-    resp: AgentResponse     = entry["response"]
-    df:   pd.DataFrame | None = entry.get("df")
-    db_err  = entry.get("db_error")
-    elapsed = entry.get("elapsed", 0)
-
-    # ── User bubble
-    st.markdown(f"""
-<div class='msg-user'>
-  <div class='msg-user-bubble'>💬 {entry['user']}</div>
-</div>""", unsafe_allow_html=True)
-
-    # ── AI error bubble
-    if resp.error:
-        st.markdown(f"""
-<div class='msg-ai'>
-  <div class='msg-ai-inner'>
-    <div class='err-block'>⚠ Agent error: {resp.error}</div>
-  </div>
-</div>""", unsafe_allow_html=True)
-        return
-
-    # Badges
-    extra_badges = ""
-    if resp.uses_cte:
-        extra_badges += "<span class='cte-badge'>⛓ CTE</span> "
-    if entry.get("healed"):
-        extra_badges += "<span class='heal-badge'>🔧 Auto-fixed</span>"
-
-    # Changes chips
-    chips_html = ""
-    if resp.changes_made:
-        chips = "".join(f"<span class='change-chip'>{c}</span>"
-                        for c in resp.changes_made)
-        chips_html = f"<div class='changes-row'>{chips}</div>"
-
-    # Context note
-    ctx_html = ""
-    if resp.context_notes:
-        ctx_html = f"<div class='ctx-note'>🔗 {resp.context_notes}</div>"
-
-    # Ambiguity
-    amb_html = ""
-    if resp.is_ambiguous and resp.clarifying_question:
-        amb_html = (f"<div class='amb-box'>❓ <b>Did you mean:</b> "
-                    f"{resp.clarifying_question}<br>"
-                    f"<small>Showing best-guess results below.</small></div>")
-
-    st.markdown(f"""
-<div class='msg-ai'>
-  <div class='msg-ai-inner'>
-    <div class='msg-ai-meta'>
-      {_mod_badge(resp.modification_type)}
-      {extra_badges}
-      <span style='font-size:.72rem;color:#475569;margin-left:auto;
-        font-family:JetBrains Mono'>{elapsed:.2f}s</span>
-    </div>
-    {_conf_bar(resp.confidence)}
-    {amb_html}
-    <div class='sql-explanation'>{resp.explanation}</div>
-    <div class='sql-block'>{entry['current_sql']}</div>
-    {chips_html}
-    {ctx_html}
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    # ── FIX #12: SQL copy button via st.code (has built-in copy icon)
-    with st.expander("✏️ Edit & Re-run  |  📋 Copy SQL", expanded=False):
-        st.code(entry["current_sql"], language="sql")
-        edited = st.text_area(
-            "Edit SQL", value=entry["current_sql"],
-            key=f"sql_edit_{i}", height=110, label_visibility="collapsed"
-        )
-        if st.button("▶ Re-run", key=f"rerun_btn_{i}", use_container_width=False):
-            st.session_state[f"rerun_sql_{i}"] = edited
-            st.session_state["rerun_idx"] = i
-            st.rerun()
-
-    # ── Results
-    if db_err:
-        st.markdown(f"<div class='err-block'>⚠ SQL error: {db_err}</div>",
-                    unsafe_allow_html=True)
-        if st.button("🔧 Auto-fix SQL", key=f"heal_btn_{i}",
-                     use_container_width=False):
-            st.session_state["heal_idx"] = i
-            st.rerun()
-
-    elif df is not None:
-        if df.empty:
-            # FIX #14: Show zero_rows_hint if available
-            hint = getattr(resp, "zero_rows_hint", "")
-            hint_html = (f"<div class='zero-hint'>💡 {hint}</div>" if hint else "")
-            st.markdown(
-                f"<div class='no-result'>⚠ Query returned 0 rows</div>{hint_html}",
-                unsafe_allow_html=True,
-            )
+from ui import theme
+
+st.set_page_config(page_title="QueryMind", page_icon=":material/database:", layout="wide")
+
+st.markdown(theme.CSS, unsafe_allow_html=True)
+
+KIND_LABELS = {"mysql": "MySQL", "postgresql": "PostgreSQL", "sqlite": "SQLite", "upload": "Uploaded files", "mssql": "SQL Server"}
+ASSISTANT_AVATAR = ":material/database:"
+
+
+# ===================================================================== state
+def init_state() -> None:
+    ss = st.session_state
+    if "settings" not in ss:
+        ss.settings = Settings()
+    ss.setdefault("catalog", DatasetCatalog())
+    ss.setdefault("store", ConnectionStore())
+    ss.setdefault("conv", Conversation())
+    ss.setdefault("convs", {})          # source_key -> Conversation, one per database
+    ss.setdefault("examples", ExampleStore())
+    ss.setdefault("linked_sel", {})     # source_key -> [source keys of extra databases to include]
+    ss.setdefault("linked_mgrs", {})    # source key -> DatabaseManager (cache for cross-database questions)
+    ss.setdefault("db", None)
+    ss.setdefault("source", None)        # {"type": "dataset"|"connection"|"url", "id": ..., "label": ...}
+    ss.setdefault("db_error", "")
+    ss.setdefault("pending_prompt", None)
+    ss.setdefault("starters", {})        # db url -> generated starter questions
+    ss.setdefault("llm_cfg", {
+        "provider": ss.settings.provider, "model": ss.settings.model, "api_key": ss.settings.api_key,
+        "base_url": ss.settings.base_url, "reasoning_effort": ss.settings.reasoning_effort,
+    })
+    if ss.db is None and not ss.db_error and "booted" not in ss:
+        ss.booted = True
+        if ss.settings.database_url:
+            connect_url(ss.settings.database_url, {"type": "url", "id": "env", "label": "DATABASE_URL"})
+        elif ss.catalog.get(ss.settings.default_dataset):
+            connect_dataset(ss.settings.default_dataset)
+
+
+def source_key(source: dict | None) -> str:
+    return f"{source['type']}:{source['id']}" if source else ""
+
+
+def _activate(db: DatabaseManager, source: dict) -> None:
+    """Make *db* the active database. Each database keeps its own conversation:
+    the current chat is parked, and the target database's chat is restored (from this session, or the latest
+    saved one on disk), so switching back and forth never loses history."""
+    ss = st.session_state
+    if ss.db is not None and ss.db is not db:
+        ss.db.dispose()
+    if ss.conv.turns:
+        save_conv()
+    if ss.conv.source_key and ss.conv.turns:
+        ss.convs[ss.conv.source_key] = ss.conv
+    ss.db, ss.source, ss.db_error = db, source, ""
+    key = source_key(source)
+    conv = ss.convs.get(key) or Conversation.latest_for(SESSIONS_DIR, key) or Conversation(source_key=key)
+    conv.source_key = key
+    conv.database = f"{source['label']} ({db.display_name})"
+    ss.conv = conv
+    ss.pop("wb_sql", None)
+
+
+def connect_key(key: str) -> bool:
+    """Reconnect to the database a saved chat belongs to."""
+    kind, _, ident = key.partition(":")
+    if kind == "dataset":
+        return connect_dataset(ident)
+    if kind == "connection":
+        return connect_saved(ident)
+    if kind == "url" and ident == "env" and st.session_state.settings.database_url:
+        return connect_url(st.session_state.settings.database_url, {"type": "url", "id": "env", "label": "DATABASE_URL"})
+    return False
+
+
+def connect_url(url: str, source: dict) -> bool:
+    ss = st.session_state
+    try:
+        db = DatabaseManager(url, ss.settings.query_timeout_s)
+        db.test_connection()
+        with st.spinner("Reading schema…"):
+            db.get_schema(refresh=True)
+        _activate(db, source)
+        return True
+    except ModuleNotFoundError as e:
+        ss.db_error = f"Missing database driver: {e.name}. Install it with `pip install {e.name}`."
+    except Exception as e:
+        ss.db_error = f"Connection failed: {str(getattr(e, 'orig', e) or e).splitlines()[0][:300]}"
+    return False
+
+
+def connect_dataset(dataset_id: str) -> bool:
+    ss = st.session_state
+    ds = ss.catalog.get(dataset_id)
+    if ds is None:
+        ss.db_error = f"Unknown dataset {dataset_id}"
+        return False
+    try:
+        if not ds.is_ready():
+            bar = st.progress(0.0, text=f"Downloading {ds.name}…")
+            url = ss.catalog.ensure(dataset_id, progress=lambda p: bar.progress(p, text=f"Downloading {ds.name}… {p:.0%}"))
+            bar.empty()
         else:
-            n     = len(df)
-            ctype = chart_type_label(df) if st.session_state.show_charts else ""
-            ctype_html = (f"<span style='color:#4af0c8;font-size:.7rem'>{ctype}</span>"
-                          if ctype else "")
-            st.markdown(
-                f"<div class='result-hdr'>Results "
-                f"<span class='result-cnt'>{n} row{'s' if n!=1 else ''}</span>"
-                f"{ctype_html}</div>",
-                unsafe_allow_html=True,
-            )
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-            # FIX #9: xlsx built lazily inside download_button callback
-            ce1, ce2, _ = st.columns([1, 1, 4])
-            with ce1:
-                st.download_button(
-                    "📥 CSV", _csv_bytes(df),
-                    file_name=f"query_{i+1}.csv", mime="text/csv",
-                    key=f"dl_csv_{i}", use_container_width=True,
-                )
-            with ce2:
-                st.download_button(
-                    "📥 Excel", _xlsx_bytes(df),
-                    file_name=f"query_{i+1}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"dl_xlsx_{i}", use_container_width=True,
-                )
-
-            # Auto chart
-            if st.session_state.show_charts:
-                fig = build_chart(df, resp.explanation)
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True,
-                                    key=f"chart_{i}")
-
-    # ── Execution plan
-    plan = entry.get("plan")
-    if st.session_state.show_plan and plan and not db_err:
-        with st.expander("🔍 Execution Plan", expanded=False):
-            st.markdown(f"<div class='plan-block'>{plan}</div>",
-                        unsafe_allow_html=True)
-
-    # ── Bookmark button
-    bm_label = "⭐ Bookmarked" if entry.get("bookmarked") else "☆ Bookmark"
-    if st.button(bm_label, key=f"bm_btn_{i}", use_container_width=False):
-        st.session_state["bm_toggle_idx"] = i
-        st.rerun()
-
-    st.markdown("<hr style='border-color:#1c2030;margin:4px 0'>",
-                unsafe_allow_html=True)
+            url = ss.catalog.ensure(dataset_id)
+    except Exception as e:
+        ss.db_error = f"Could not download {ds.name}: {e}"
+        return False
+    return connect_url(url, {"type": "dataset", "id": ds.id, "label": ds.name})
 
 
-# ── Chat log ───────────────────────────────────────────────────────────────────
+def connect_saved(name: str) -> bool:
+    conn = st.session_state.store.get(name)
+    if conn is None:
+        return False
+    return connect_url(conn.resolved_url(), {"type": "connection", "id": conn.name, "label": conn.name})
 
-def render_chat_log():
-    for i, entry in enumerate(st.session_state.chat_log):
-        render_message(i, entry)
+
+def get_agent() -> SQLAgent | None:
+    ss = st.session_state
+    cfg = ss.llm_cfg
+    if ss.db is None:
+        return None
+    try:
+        llm = OpenAICompatibleLLM(cfg["api_key"], cfg["model"], cfg["base_url"], ss.settings.temperature,
+                                  reasoning_effort=cfg.get("reasoning_effort", "medium"))
+    except LLMError:
+        return None
+    return SQLAgent(ss.db, llm, max_retries=ss.settings.max_retries, history_turns=ss.settings.history_turns,
+                    row_limit=ss.settings.row_limit, max_steps=ss.settings.max_steps,
+                    examples=ss.examples, source_key=ss.conv.source_key,
+                    linked=linked_databases(), main_alias=alias_for(ss.conv.source_key, ss.source["label"]) if ss.source else "main")
 
 
-# ── Input area — FIX #5: use st.form so Enter key submits ─────────────────────
+def alias_for(key: str, label: str) -> str:
+    """Short name the model uses to address a database: the dataset id, or a slug of the connection name."""
+    kind, _, ident = key.partition(":")
+    return (ident if kind == "dataset" else slugify(theme.short_name(label)))[:30] or "db"
 
-def render_input() -> tuple[str, bool]:
-    prefill = st.session_state.pop("prefill", "")
-    with st.form("query_form", clear_on_submit=True):
-        c1, c2 = st.columns([6, 1])
-        with c1:
-            user_input = st.text_input(
-                "query", label_visibility="collapsed",
-                value=prefill,
-                placeholder="Ask anything… e.g. 'Show revenue by category', 'Break it down by month'…",
-                key="main_input",
-            )
+
+def source_options() -> dict[str, str]:
+    """Every database the user can pick: catalog datasets and saved connections, keyed by source key."""
+    ss = st.session_state
+    opts = {f"dataset:{d.id}": d.name for d in ss.catalog.all()}
+    opts.update({f"connection:{c.name}": c.name for c in ss.store.all()})
+    return opts
+
+
+def _manager_for(key: str) -> DatabaseManager | None:
+    ss = st.session_state
+    if key in ss.linked_mgrs:
+        return ss.linked_mgrs[key]
+    kind, _, ident = key.partition(":")
+    try:
+        if kind == "dataset":
+            url = ss.catalog.ensure(ident)
+        elif kind == "connection" and ss.store.get(ident):
+            url = ss.store.get(ident).resolved_url()
+        else:
+            return None
+        mgr = DatabaseManager(url, ss.settings.query_timeout_s)
+        mgr.get_schema()
+    except Exception as e:
+        st.toast(f"Couldn't open {ident}: {str(e)[:120]}", icon=":material/error:")
+        return None
+    ss.linked_mgrs[key] = mgr
+    return mgr
+
+
+def linked_databases() -> dict[str, DatabaseManager]:
+    """Extra databases the user included for cross-database questions, as {alias: manager}."""
+    ss = st.session_state
+    out: dict[str, DatabaseManager] = {}
+    names = source_options()
+    for key in ss.linked_sel.get(ss.conv.source_key, []):
+        if key == ss.conv.source_key or key not in names:
+            continue
+        mgr = _manager_for(key)
+        if mgr is not None:
+            out[alias_for(key, names[key])] = mgr
+    return out
+
+
+def save_conv() -> None:
+    conv = st.session_state.conv
+    if conv.turns:
+        conv.save(SESSIONS_DIR)
+
+
+def conv_to_markdown(conv: Conversation) -> str:
+    out = [f"# {conv.title}\n", f"_Database: {conv.database}_\n"]
+    for t in conv.turns:
+        if t.role == "user":
+            out.append(f"\n**You:** {t.content}\n")
+        else:
+            out.append(f"\n**QueryMind:** {t.content}\n")
+            if t.sql:
+                out.append(f"\n```sql\n{t.sql}\n```\n")
+    return "\n".join(out)
+
+
+# =================================================================== sidebar
+def sidebar_database() -> None:
+    ss = st.session_state
+    catalog: DatasetCatalog = ss.catalog
+    store: ConnectionStore = ss.store
+
+    st.markdown('<div class="qm-side-label">Connected database</div>', unsafe_allow_html=True)
+    if ss.source and ss.db is not None:
+        st.markdown(theme.current_db_html(ss.source["label"], ss.db.display_name.replace(" · ", ", ")), unsafe_allow_html=True)
+    else:
+        st.markdown(theme.current_db_html("Nothing connected", "Pick a dataset below"), unsafe_allow_html=True)
+
+    options: dict[str, str] = {}
+    for ds in catalog.all():
+        options[f"dataset:{ds.id}"] = ds.name + ("" if ds.is_ready() else " (download)")
+    for c in store.all():
+        options[f"conn:{c.name}"] = f"{c.name} ({KIND_LABELS.get(c.kind, c.kind or 'database')})"
+    current = f"{'dataset' if ss.source and ss.source['type'] == 'dataset' else 'conn'}:{ss.source['id']}" if ss.source else None
+    keys = list(options)
+    choice = st.selectbox("Switch database", keys, format_func=options.get,
+                          index=keys.index(current) if current in keys else None, placeholder="Choose a dataset or connection…")
+    if choice:
+        kind, ident = choice.split(":", 1)
+        if kind == "dataset":
+            ds = catalog.get(ident)
+            st.caption(ds.description)
+            if ds.source:
+                st.caption(f"[Source]({ds.source}), license: {ds.license or 'see source'}")
+        else:
+            st.caption(f"`{store.get(ident).masked_url()}`")
+        c1, c2 = st.columns([3, 1])
+        if c1.button("Connect", type="primary", width="stretch", disabled=choice == current):
+            ok = connect_dataset(ident) if kind == "dataset" else connect_saved(ident)
+            if ok:
+                st.rerun()
+        removable = kind == "conn" or (catalog.get(ident) and catalog.get(ident).custom)
+        if c2.button("", icon=":material/delete:", help="Remove from the list", width="stretch", disabled=not removable):
+            catalog.remove(ident) if kind == "dataset" else store.remove(ident)
+            st.rerun()
+    if ss.db_error:
+        st.error(ss.db_error)
+
+    if ss.db is not None and ss.conv.source_key:
+        names = {k: v for k, v in source_options().items() if k != ss.conv.source_key}
+        current_sel = [k for k in ss.linked_sel.get(ss.conv.source_key, []) if k in names]
+        with st.expander(f"Combine with other databases ({len(current_sel)})", icon=":material/join:"):
+            st.caption("Questions can then use data from these databases too. Each step queries one database, "
+                       "and the results are joined in a temporary table.")
+            picked = st.multiselect("Also include", list(names), default=current_sel, format_func=names.get,
+                                    placeholder="Pick databases…", label_visibility="collapsed")
+            if picked != current_sel:
+                ss.linked_sel[ss.conv.source_key] = picked
+                with st.spinner("Opening databases…"):
+                    linked_databases()
+                st.rerun()
+
+    with st.expander("Add a database", icon=":material/add_circle:"):
+        sidebar_add_database()
+
+
+def sidebar_add_database() -> None:
+    ss = st.session_state
+    store: ConnectionStore = ss.store
+    kind = st.selectbox("Type", ["MySQL / MariaDB", "PostgreSQL", "SQLite file", "Any SQLAlchemy URL",
+                                 "Upload CSV / Excel", "Dataset from a URL"])
+
+    def finish(name: str, url: str, conn_kind: str, remember: bool) -> None:
+        if connect_url(os.path.expandvars(url), {"type": "connection" if remember else "url", "id": name, "label": name}):
+            if remember:
+                store.save(SavedConnection(name=name, url=url, kind=conn_kind))
+            st.rerun()
+        else:
+            st.error(ss.db_error)
+
+    if kind in ("MySQL / MariaDB", "PostgreSQL"):
+        mysql = kind.startswith("MySQL")
+        with st.form(f"add_{kind}"):
+            name = st.text_input("Name", placeholder="e.g. Sales DB (prod replica)")
+            c1, c2 = st.columns([3, 1])
+            host = c1.text_input("Host", "localhost")
+            port = c2.number_input("Port", value=3306 if mysql else 5432, step=1)
+            user = st.text_input("User", "root" if mysql else "postgres")
+            pwd = st.text_input("Password", type="password", help="Tip: type ${MY_DB_PASSWORD} to read it from an environment variable.")
+            dbname = st.text_input("Database")
+            remember = st.checkbox("Save this connection", value=True, help="Saved in connections.json on this computer (git-ignored).")
+            if st.form_submit_button("Connect", width="stretch", type="primary"):
+                driver = "mysql+pymysql" if mysql else "postgresql+psycopg2"
+                if pwd.startswith("${"):
+                    url = f"{driver}://{user}:{pwd}@{host}:{int(port)}/{dbname}"
+                else:
+                    url = URL.create(driver, username=user, password=pwd or None, host=host, port=int(port),
+                                     database=dbname).render_as_string(hide_password=False)
+                finish(name or f"{dbname}@{host}", url, "mysql" if mysql else "postgresql", remember)
+
+    elif kind == "SQLite file":
+        with st.form("add_sqlite"):
+            path = st.text_input("Path to the .db / .sqlite file", placeholder=r"D:\data\shop.db")
+            name = st.text_input("Name", placeholder="optional")
+            remember = st.checkbox("Save this connection", value=True)
+            if st.form_submit_button("Connect", width="stretch", type="primary") and path:
+                p = Path(path.strip().strip('"'))
+                if not p.exists():
+                    st.error("File not found.")
+                else:
+                    finish(name or p.stem, sqlite_url(p), "sqlite", remember)
+
+    elif kind == "Any SQLAlchemy URL":
+        with st.form("add_url"):
+            st.caption("Works with any database that has a SQLAlchemy driver installed — e.g. "
+                       "`mssql+pyodbc://…`, `oracle+oracledb://…`, `duckdb:///file.duckdb`, `snowflake://…`.")
+            url = st.text_input("URL", type="password", placeholder="dialect+driver://user:password@host:port/database")
+            name = st.text_input("Name")
+            remember = st.checkbox("Save this connection", value=True)
+            if st.form_submit_button("Connect", width="stretch", type="primary") and url:
+                finish(name or kind_from_url(url), url, kind_from_url(url), remember)
+
+    elif kind == "Upload CSV / Excel":
+        files = st.file_uploader("Each CSV (or Excel sheet) becomes a table", type=["csv", "tsv", "xlsx", "xls"],
+                                 accept_multiple_files=True)
+        name = st.text_input("Name for this database", placeholder="e.g. Marketing data")
+        if st.button("Create database", width="stretch", type="primary", disabled=not files):
+            frames: dict[str, pd.DataFrame] = {}
+            UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+            for f in files:
+                tmp = UPLOADS_DIR / f.name
+                tmp.write_bytes(f.getvalue())
+                fkind = "excel" if f.name.lower().endswith((".xlsx", ".xls")) else "csv"
+                for sheet, df in read_table_file(tmp, fkind).items():
+                    frames[sheet if fkind == "csv" or len(files) == 1 else f"{tmp.stem}_{sheet}"] = df
+                tmp.unlink(missing_ok=True)
+            label = name or Path(files[0].name).stem
+            db_path = frames_to_sqlite(frames, UPLOADS_DIR / f"{slugify(label)}.db")
+            finish(label, sqlite_url(db_path), "upload", True)
+
+    else:  # Dataset from a URL
+        with st.form("add_dataset"):
+            st.caption("Any public link to a .csv, .xlsx or .db/.sqlite file (GitHub raw links, data portals…). "
+                       "It is downloaded and added to datasets.json so it appears in the list for everyone using this folder.")
+            url = st.text_input("File URL")
+            name = st.text_input("Name")
+            c1, c2 = st.columns(2)
+            ftype = c1.selectbox("Type", ["auto", "csv", "excel", "sqlite"])
+            table = c2.text_input("Table name", placeholder="optional")
+            desc = st.text_input("Description", placeholder="optional")
+            if st.form_submit_button("Download & connect", width="stretch", type="primary") and url and name:
+                try:
+                    with st.spinner("Downloading…"):
+                        ds = ss.catalog.add(name, url.strip(), "" if ftype == "auto" else ftype, table, desc)
+                    if connect_dataset(ds.id):
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Could not add dataset: {e}")
+
+
+def sidebar() -> None:
+    ss = st.session_state
+    s: Settings = ss.settings
+    with st.sidebar:
+        st.markdown(theme.brand_html(), unsafe_allow_html=True)
+        sidebar_database()
+        st.markdown('<div class="qm-side-label">Assistant</div>', unsafe_allow_html=True)
+
+        # ---- model
+        cfg = ss.llm_cfg
+        with st.expander("Language model", icon=":material/psychology:", expanded=not cfg["api_key"]):
+            providers = list(PROVIDERS) + ["custom"]
+            provider = st.selectbox("Provider", providers, index=providers.index(cfg["provider"]) if cfg["provider"] in providers else 0)
+            if provider != cfg["provider"]:
+                preset = PROVIDERS.get(provider, {})
+                key_env = preset.get("key_env", "")
+                cfg.update(provider=provider, model=preset.get("model", cfg["model"]),
+                           base_url=preset.get("base_url", cfg["base_url"]),
+                           api_key="ollama" if provider == "ollama" else os.getenv(key_env, "") if key_env else "")
+                ss.pop("api_key_input", None)
+                ss.pop("llm_test", None)
+            models = PROVIDERS.get(provider, {}).get("models", [])
+            choices = models + ["Other…"]
+            idx = choices.index(cfg["model"]) if cfg["model"] in choices else len(choices) - 1
+            picked = st.selectbox("Model", choices, index=idx)
+            if picked == "Other…":
+                cfg["model"] = st.text_input("Model ID", cfg["model"], placeholder="e.g. qwen/qwen3-32b").strip()
+            else:
+                cfg["model"] = picked
+            if is_reasoning_model(cfg["model"]):
+                efforts = ["low", "medium", "high"]
+                cfg["reasoning_effort"] = st.select_slider("Reasoning effort", efforts,
+                                                           value=cfg.get("reasoning_effort", "medium") if cfg.get("reasoning_effort") in efforts else "medium",
+                                                           help="Higher = more careful SQL on complex questions, but slower.")
+            if provider == "custom":
+                cfg["base_url"] = st.text_input("Base URL (OpenAI-compatible)", cfg["base_url"])
+            if provider != "ollama":
+                if "api_key_input" not in ss:
+                    ss.api_key_input = cfg["api_key"]
+                st.text_input("API key", key="api_key_input", type="password",
+                              help="Kept only in this browser session. Put it in .env to avoid re-entering.")
+                cfg["api_key"] = ss.api_key_input.strip()
+                st.caption("Key loaded" if cfg["api_key"] else "No key yet. Free Groq keys: console.groq.com/keys")
+            if st.button("Test model", icon=":material/bolt:", width="stretch", disabled=not cfg["api_key"]):
+                try:
+                    llm = OpenAICompatibleLLM(cfg["api_key"], cfg["model"], cfg["base_url"],
+                                              reasoning_effort=cfg.get("reasoning_effort", "low"))
+                    with st.spinner("Contacting model…"):
+                        llm.chat([{"role": "user", "content": "Reply with the single word: OK"}])
+                    ss.llm_test = ("ok", f"Connected to {cfg['model']}")
+                except LLMError as e:
+                    ss.llm_test = ("err", str(e))
+            if ss.get("llm_test"):
+                (st.success if ss.llm_test[0] == "ok" else st.error)(ss.llm_test[1])
+
+        if ss.conv.source_key:
+            good_n, bad_n = ss.examples.stats(ss.conv.source_key)
+            if good_n or bad_n:
+                st.caption(f"Learning from your feedback on this database: {good_n} 👍, {bad_n} 👎")
+
+        # ---- settings
+        with st.expander("Safety and limits", icon=":material/tune:"):
+            write_mode = st.toggle("Allow data changes (write mode)", value=not s.read_only,
+                                   help="When on, INSERT/UPDATE/DELETE/DDL can be generated — each still needs your confirmation.")
+            s.read_only = not write_mode
+            if write_mode:
+                st.markdown(theme.caution_html("Write mode is on. Every change still needs your confirmation."), unsafe_allow_html=True)
+            s.row_limit = st.slider("Max rows returned", 50, 5000, s.row_limit, step=50)
+            s.max_retries = st.slider("Self-correction attempts", 0, 5, s.max_retries)
+            s.history_turns = st.slider("Conversation memory (turns)", 2, 20, s.history_turns)
+            s.max_steps = st.slider("Max reasoning steps (multi-hop questions)", 2, 8, s.max_steps)
+
+        # ---- schema explorer
+        if ss.db is not None:
+            schema = ss.db.get_schema()
+            with st.expander(f"Schema ({len(schema)} tables and views)", icon=":material/account_tree:"):
+                if st.button("Refresh schema", icon=":material/refresh:", width="stretch"):
+                    ss.db.get_schema(refresh=True)
+                    st.rerun()
+                for t in schema.values():
+                    rows = f", {t.row_count:,} rows" if t.row_count is not None else ""
+                    kind = "view" if t.is_view else "table"
+                    st.markdown(f"**{t.name}** <span style='color:#9FB0CF;font-size:.8rem'>{kind}{rows}</span>", unsafe_allow_html=True)
+                    st.caption(", ".join(f"{c.name} (key)" if c.primary_key else c.name for c in t.columns))
+
+        # ---- chats
+        st.divider()
+        c1, c2 = st.columns(2)
+        if c1.button("New chat", icon=":material/edit_square:", width="stretch"):
+            save_conv()
+            ss.conv = Conversation(database=ss.conv.database, source_key=ss.conv.source_key)
+            st.rerun()
+        c2.download_button("Export", conv_to_markdown(ss.conv), file_name=f"{ss.conv.id}.md", icon=":material/download:",
+                           width="stretch", disabled=not ss.conv.turns)
+        saved = [r for r in Conversation.list_saved(SESSIONS_DIR) if r["path"].stem != ss.conv.id]
+        if saved:
+            here = [r for r in saved if r["source_key"] == ss.conv.source_key]
+            elsewhere = [r for r in saved if r["source_key"] != ss.conv.source_key]
+            rows = {str(r["path"]): r for r in here + elsewhere}
+
+            def chat_label(k: str) -> str:
+                r = rows[k]
+                db = theme.short_name(r["database"]) if r["database"] else "unknown database"
+                return f"{r['title'][:38]}  ({db})"
+
+            choice = st.selectbox(f"Previous chats ({len(here)} for this database)", list(rows), format_func=chat_label,
+                                  index=None, placeholder="Open a previous chat…")
+            if choice:
+                r = rows[choice]
+                other_db = r["source_key"] and r["source_key"] != ss.conv.source_key
+                if other_db:
+                    st.caption(f"Opening this switches to {theme.short_name(r['database'])}.")
+                if st.button("Open chat", icon=":material/history:", width="stretch"):
+                    save_conv()
+                    if other_db and not connect_key(r["source_key"]):
+                        st.error(ss.db_error or "Could not reconnect to that chat's database.")
+                    else:
+                        ss.conv = Conversation.load(r["path"])
+                        st.rerun()
+
+        sidebar_clear_history()
+
+
+def clear_all_history() -> int:
+    """Delete every saved chat (all databases) and reset the open conversation. Learned 👍/👎 examples are kept."""
+    ss = st.session_state
+    removed = 0
+    if SESSIONS_DIR.exists():
+        for path in SESSIONS_DIR.glob("*.json"):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    ss.convs = {}
+    ss.conv = Conversation(database=ss.conv.database, source_key=ss.conv.source_key)
+    for key in [k for k in ss.keys() if str(k).startswith(("fb_", "fbn_", "ct_", "opt_", "fu_"))]:
+        del ss[key]
+    ss.pending_prompt = None
+    return removed
+
+
+def sidebar_clear_history() -> None:
+    ss = st.session_state
+    has_history = bool(ss.conv.turns) or bool(Conversation.list_saved(SESSIONS_DIR))
+    with st.container(key="danger_zone"):
+        if not ss.get("confirm_clear"):
+            if st.button("Clear all chat history", icon=":material/delete_forever:", width="stretch",
+                         disabled=not has_history, key="clear_history"):
+                ss.confirm_clear = True
+                st.rerun()
+        else:
+            st.markdown(theme.caution_html("This permanently deletes every saved chat for all databases. "
+                                           "Learned 👍/👎 examples are kept."), unsafe_allow_html=True)
+            c1, c2 = st.columns(2)
+            if c1.button("Delete all", icon=":material/delete_forever:", width="stretch", key="clear_confirm"):
+                n = clear_all_history()
+                ss.confirm_clear = False
+                st.toast(f"Deleted {n} saved chat{'s' if n != 1 else ''}.", icon=":material/delete:")
+                st.rerun()
+            if c2.button("Cancel", width="stretch", key="clear_cancel"):
+                ss.confirm_clear = False
+                st.rerun()
+
+
+# ==================================================================== render
+def render_result(turn: Turn, key: str) -> None:
+    df = turn.df
+    if df is None or df.empty:
+        return
+    spec = turn.chart or suggest_chart(df)
+    options = chart_options(df, spec)
+    tabs = st.tabs(["Chart", "Table"] if options else ["Table"])
+    if options:
+        with tabs[0]:
+            kinds = list(options)
+            choice = kinds[0]
+            if len(kinds) > 1:
+                choice = st.segmented_control("Chart type", kinds, format_func=CHART_LABELS.get, default=kinds[0],
+                                              key=f"ct_{key}", label_visibility="collapsed") or kinds[0]
+            fig = build_figure(df, options[choice], turn.title)
+            if fig is not None:
+                st.plotly_chart(fig, width="stretch", key=f"chart_{key}_{choice}", config=PLOTLY_CONFIG)
+            else:
+                st.caption("This result can't be drawn as that chart type. Try another or use the table.")
+    with tabs[-1]:
+        st.dataframe(df, width="stretch", hide_index=True)
+    c1, c2 = st.columns([5, 1], vertical_alignment="center")
+    note = f"Showing the first {len(df):,} rows (row limit)." if turn.truncated else f"{turn.row_count:,} rows"
+    c1.caption(note)
+    c2.download_button("CSV", df.to_csv(index=False).encode(), icon=":material/download:",
+                       file_name=f"{(turn.title or 'result').replace(' ', '_')}.csv", key=f"dl_{key}", width="stretch")
+
+
+def _on_feedback(turn: Turn, question: str) -> None:
+    ss = st.session_state
+    value = ss.get(f"fb_{turn.id}")
+    turn.feedback = value
+    if value is None:
+        ss.examples.remove(turn.id)
+    else:
+        ss.examples.record(ss.conv.source_key, question, turn.sql, good=value == 1, note=turn.feedback_note, turn_id=turn.id)
+    save_conv()
+
+
+def _on_feedback_note(turn: Turn, question: str) -> None:
+    ss = st.session_state
+    turn.feedback_note = ss.get(f"fbn_{turn.id}", "")
+    if turn.feedback == 0:
+        ss.examples.record(ss.conv.source_key, question, turn.sql, good=False, note=turn.feedback_note, turn_id=turn.id)
+    save_conv()
+
+
+def render_feedback(turn: Turn, question: str) -> None:
+    ss = st.session_state
+    key = f"fb_{turn.id}"
+    if key not in ss and turn.feedback is not None:
+        ss[key] = turn.feedback
+    c1, c2 = st.columns([1, 6], vertical_alignment="center")
+    with c1:
+        st.feedback("thumbs", key=key, on_change=_on_feedback, args=(turn, question))
+    if turn.feedback == 1:
+        c2.caption("Saved as a verified example. Similar questions will follow this answer.")
+    elif turn.feedback == 0:
         with c2:
-            submit = st.form_submit_button("Ask ↵", use_container_width=True)
-    return user_input, submit
+            st.text_input("What was wrong?", value=turn.feedback_note, key=f"fbn_{turn.id}",
+                          placeholder="What was wrong? e.g. revenue should exclude refunds",
+                          label_visibility="collapsed", on_change=_on_feedback_note, args=(turn, question))
+    else:
+        c2.caption("Was this right? Your rating teaches the assistant.")
 
 
-# ── Process new message ────────────────────────────────────────────────────────
+def render_assistant(turn: Turn, is_last: bool, question: str = "") -> None:
+    ss = st.session_state
+    with st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
+        tags: list[tuple[str, str]] = []
+        if turn.sql and not turn.error:
+            if turn.df is not None and not turn.df.empty:
+                tags.append((f"{turn.row_count:,} rows", ""))
+            if turn.elapsed_ms:
+                tags.append((f"{turn.elapsed_ms:.0f} ms", ""))
+            if turn.attempts > 1:
+                tags.append((f"fixed itself after {turn.attempts - 1} {'retry' if turn.attempts == 2 else 'retries'}", "fix"))
+        if turn.used_examples:
+            tags.append((f"used {turn.used_examples} saved {'example' if turn.used_examples == 1 else 'examples'}", "fix"))
+        if turn.steps:
+            n_steps = len(turn.steps)
+            tags.insert(0, (f"{n_steps} reasoning {'step' if n_steps == 1 else 'steps'}", "sql"))
+        if turn.action == "pending":
+            tags.append(("needs your confirmation", "warn"))
+        if tags:
+            st.markdown(theme.tags_html(tags), unsafe_allow_html=True)
 
-def process_message(user_input: str):
-    agent: ConversationalSQLAgent = st.session_state.agent
-    dm:    DatabaseManager        = st.session_state.db_manager
+        if turn.content:
+            st.markdown(money_safe(turn.content))
 
-    with st.spinner("Thinking…"):
-        t0      = time.time()
-        resp    = agent.chat(user_input.strip())
-        elapsed = time.time() - t0
+        render_result(turn, turn.id)
 
-    df, db_err, plan = None, None, None
+        if turn.steps:
+            with st.expander(f"How I worked it out ({len(turn.steps)} {'step' if len(turn.steps) == 1 else 'steps'})",
+                             icon=":material/route:"):
+                multi_db = len({st_.get("database") for st_ in turn.steps}) > 1
+                for i, step in enumerate(turn.steps, 1):
+                    status = f"error: {step['error']}" if step.get("error") else f"{step.get('row_count', 0):,} rows"
+                    if multi_db and step.get("database"):
+                        status = f"on {step['database']}, {status}"
+                    st.markdown(f"**Step {i}. {step.get('purpose', '')}**  \n<span style='color:#5D6A82;font-size:.85rem'>{status}</span>",
+                                unsafe_allow_html=True)
+                    st.code(step.get("sql", ""), language="sql", wrap_lines=True)
+                    if step.get("rows"):
+                        st.dataframe(pd.DataFrame(step["rows"], columns=step.get("columns") or None),
+                                     hide_index=True, width="stretch")
+        if turn.sql:
+            with st.expander("SQL used" if not turn.steps else "Final SQL", icon=":material/code:",
+                             expanded=turn.action == "pending" or bool(turn.error)):
+                st.code(turn.sql, language="sql", wrap_lines=True)
+                if turn.explanation:
+                    st.caption(turn.explanation)
+        for w in turn.warnings:
+            st.markdown(theme.caution_html(w), unsafe_allow_html=True)
 
-    if not resp.error and resp.sql:
-        rows, cols, db_err = dm.run_query(resp.sql)
+        if turn.action == "pending":
+            c1, c2, _ = st.columns([1.2, 1, 3])
+            agent = get_agent()
+            if c1.button("Run change", icon=":material/play_arrow:", key=f"ok_{turn.id}", type="primary",
+                         disabled=agent is None or ss.settings.read_only):
+                agent.confirm_pending(turn)
+                save_conv()
+                st.rerun()
+            if c2.button("Cancel", key=f"no_{turn.id}"):
+                SQLAgent.cancel_pending(turn)
+                save_conv()
+                st.rerun()
 
-        # Auto-heal on first failure
-        if db_err:
-            healed = agent.self_heal_sql(resp.sql, db_err)
-            if not healed.error and healed.sql and healed.sql != resp.sql:
-                rows2, cols2, db_err2 = dm.run_query(healed.sql)
-                if not db_err2:
-                    # FIX #1: use the healed query's results, not the failed ones
-                    resp.sql          = healed.sql
-                    resp.explanation  = healed.explanation
-                    resp.changes_made = healed.changes_made
-                    rows, cols, db_err = rows2, cols2, db_err2
+        if turn.action == "query" and turn.sql and not turn.error and turn.df is not None:
+            render_feedback(turn, question or turn.question)
 
-        if not db_err and rows:
-            df = pd.DataFrame(rows, columns=cols)
-        elif not db_err:
-            df = pd.DataFrame()
-
-        if not db_err:
-            plan = dm.get_execution_plan(resp.sql)
-
-    entry = {
-        "user":        user_input.strip(),
-        "response":    resp,
-        "df":          df,
-        "db_error":    db_err,
-        "elapsed":     round(elapsed, 2),
-        "current_sql": resp.sql,
-        "bookmarked":  False,
-        "healed":      False,
-        "plan":        plan,
-    }
-    st.session_state.chat_log.append(entry)
-
-    # FIX #17: auto-save after every message
-    auto_save_session(st.session_state.chat_log)
-
-
-# ── Welcome screen ─────────────────────────────────────────────────────────────
-
-def render_welcome():
-    st.markdown("""
-<div style='text-align:center;padding:44px 20px 24px'>
-  <div style='font-size:3.2rem;margin-bottom:14px'>💬</div>
-  <div style='font-size:1.1rem;font-weight:600;color:#e2e8f0;margin-bottom:8px'>
-    Ask anything about the database
-  </div>
-  <div style='font-size:.84rem;color:#64748b;max-width:500px;margin:0 auto;line-height:1.7'>
-    QueryMind understands follow-up questions, pronoun references, and query modifications.
-    Results are auto-charted, editable, and exportable.
-  </div>
-  <div style='margin-top:24px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center'>
-    <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-      padding:8px 14px;font-size:.79rem;color:#94a3b8'>📦 "Show revenue by category"</div>
-    <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-      padding:8px 14px;font-size:.79rem;color:#94a3b8'>➕ "Break it down by month"</div>
-    <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-      padding:8px 14px;font-size:.79rem;color:#94a3b8'>🎯 "Just Electronics in 2023"</div>
-    <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-      padding:8px 14px;font-size:.79rem;color:#94a3b8'>🔗 "Which have rating &gt; 4?"</div>
-    <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-      padding:8px 14px;font-size:.79rem;color:#94a3b8'>📥 Upload your own CSV / SQLite</div>
-  </div>
-</div>""", unsafe_allow_html=True)
+        if is_last and turn.action == "clarify" and turn.options:
+            pick = st.pills("Choose an answer", turn.options, key=f"opt_{turn.id}", label_visibility="collapsed")
+            if pick:
+                ss.pending_prompt = pick
+                st.rerun()
+        if is_last and turn.follow_ups:
+            st.markdown('<div class="qm-hint">Ask next</div>', unsafe_allow_html=True)
+            pick = st.pills("Ask next", turn.follow_ups, key=f"fu_{turn.id}", label_visibility="collapsed")
+            if pick:
+                ss.pending_prompt = pick
+                st.rerun()
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+def money_safe(text: str) -> str:
+    """Stop Streamlit from reading '$450 ... $480' as a LaTeX formula."""
+    return text.replace("\\$", "$").replace("$", "\\$")
 
-def main():
-    _init_state()
-    _handle_pending()
 
-    # Header
-    st.markdown("""
-<div class='qm-header'>
-  <div class='qm-logo'>🧠</div>
-  <div>
-    <p class='qm-title'>QueryMind <span style='font-size:.9rem;color:#6366f1'>v2</span></p>
-    <p class='qm-sub'>Conversational SQL · Groq · llama-3.3-70b-versatile</p>
-  </div>
-</div>""", unsafe_allow_html=True)
+def render_user(text: str) -> None:
+    with st.chat_message("user"):
+        st.markdown(f'<span class="qm-user"></span>{theme.esc(money_safe(text))}', unsafe_allow_html=True)
 
-    # API key guard
-    if not os.environ.get("GROQ_API_KEY"):
-        st.markdown("""
-<div style='text-align:center;padding:60px 20px'>
-  <div style='font-size:2.8rem;margin-bottom:14px'>🔑</div>
-  <div style='font-size:1rem;color:#94a3b8;margin-bottom:6px'>No API key detected</div>
-  <div style='font-size:.83rem;color:#64748b'>
-    Add your <code style='color:#7c6af7'>GROQ_API_KEY</code> in the sidebar
-    or create a <code style='color:#7c6af7'>.env</code> file.
-  </div>
-</div>""", unsafe_allow_html=True)
-        render_sidebar()
+
+def starter_questions(agent: SQLAgent | None) -> list[str]:
+    """Curated examples for catalog datasets; LLM-generated from the schema for any other database."""
+    ss = st.session_state
+    src = ss.source or {}
+    if src.get("type") == "dataset":
+        ds = ss.catalog.get(src["id"])
+        if ds and ds.examples:
+            return ds.examples[:4]
+    key = ss.db.url
+    if key not in ss.starters and agent is not None:
+        with st.spinner("Looking at your schema…"):
+            ss.starters[key] = agent.suggest_questions()
+    if ss.starters.get(key):
+        return ss.starters[key]
+    tables = [n for n, t in ss.db.get_schema().items() if not t.is_view]
+    first = tables[0] if tables else "my_table"
+    return ["What tables are in this database and what do they contain?", f"Show me 10 rows from {first}",
+            "How many rows does each table have?", f"Summarise the numeric columns of {first}"]
+
+
+def header(compact: bool) -> None:
+    ss = st.session_state
+    label = ss.source["label"] if ss.source else ss.db.display_name
+    name = theme.short_name(label)
+    pills = [("Read-only", "") if ss.settings.read_only else ("Write mode", "write"), (ss.llm_cfg["model"].split("/")[-1], "")]
+    names = source_options()
+    pills += [(f"+ {theme.short_name(names[k])}", "") for k in ss.linked_sel.get(ss.conv.source_key, [])
+              if k in names and k != ss.conv.source_key]
+    if compact:
+        st.markdown(theme.bar_html(name, pills), unsafe_allow_html=True)
+        return
+    lede = ""
+    if ss.source and ss.source.get("type") == "dataset":
+        ds = ss.catalog.get(ss.source["id"])
+        lede = ds.description if ds else ""
+    schema = ss.db.get_schema()
+    tables = sorted(((t.name, t.row_count, t.is_view) for t in schema.values()), key=lambda x: (x[2], x[0].lower()))
+    where = f"{ss.db.display_name.replace(' · ', ', ')}. {pills[0][0]}, answering with {pills[1][0]}."
+    st.markdown(theme.hero_html(name, where, lede, tables), unsafe_allow_html=True)
+
+
+def chat_view() -> None:
+    ss = st.session_state
+    conv: Conversation = ss.conv
+    agent = get_agent()
+
+    if ss.db is None:
+        st.markdown(theme.hero_html("your data", "Nothing connected yet.",
+                                    "Pick one of the real datasets in the sidebar, or add your own MySQL, PostgreSQL, "
+                                    "SQLite or CSV data under Add a database.", []), unsafe_allow_html=True)
         return
 
-    render_sidebar()
+    header(compact=bool(conv.turns))
 
-    # FIX #17: Offer to restore autosave on first load if available
-    if (not st.session_state.chat_log
-            and not st.session_state.autosave_prompted
-            and has_autosave()):
-        st.session_state.autosave_prompted = True
-        st.markdown(
-            "<div class='autosave-banner'>💾 A previous session was auto-saved. "
-            "Restore it?</div>",
-            unsafe_allow_html=True,
-        )
-        r1, r2, _ = st.columns([1, 1, 5])
-        with r1:
-            if st.button("↩ Restore", use_container_width=True):
-                st.session_state.chat_log = load_autosave()
-                st.rerun()
-        with r2:
-            if st.button("✕ Dismiss", use_container_width=True):
-                st.rerun()
+    if agent is None:
+        st.warning("**Add an API key to start asking questions.** " + key_setup_hint() +
+                   "\n\nUntil then, you can browse the schema in the sidebar and run SQL in the SQL workbench.",
+                   icon=":material/key:")
 
-    if not st.session_state.chat_log:
-        render_welcome()
+    if not conv.turns:
+        st.markdown('<div class="qm-section">Try one of these</div>', unsafe_allow_html=True)
+        with st.container(key="starters"):
+            cols = st.columns(2)
+            for i, q in enumerate(starter_questions(agent)):
+                if cols[i % 2].button(q, key=f"start_{i}", width="stretch"):
+                    ss.pending_prompt = q
+                    st.rerun()
 
-    render_chat_log()
+    last_idx = len(conv.turns) - 1
+    for i, t in enumerate(conv.turns):
+        if t.role == "user":
+            render_user(t.content)
+        else:
+            prev_q = conv.turns[i - 1].content if i > 0 and conv.turns[i - 1].role == "user" else ""
+            render_assistant(t, is_last=i == last_idx, question=prev_q)
 
-    user_input, submit = render_input()
+    prompt = st.chat_input("Ask a question about your data, e.g. which genre sells best?")
+    prompt = prompt or ss.pending_prompt
+    if prompt and agent is None:
+        ss.pending_prompt = None
+        st.error("Add an API key in the sidebar under Language model, then ask again.", icon=":material/key:")
+    elif prompt:
+        ss.pending_prompt = None
+        render_user(prompt)
+        with st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
+            status_box = st.status("Understanding your question…", expanded=False)
+            answer_box = st.empty()
 
-    # FIX #6: auto-submit when a sidebar example was clicked
-    auto = st.session_state.pop("auto_submit", False)
+            def on_status(message: str) -> None:
+                status_box.update(label=message, state="running")
+                if message.startswith("Step "):
+                    status_box.write(message)
 
-    if (submit or auto) and user_input.strip():
-        process_message(user_input)
+            def on_token(text: str) -> None:
+                answer_box.markdown(money_safe(text) + " ▌")
+
+            turn = agent.respond(conv, prompt, read_only=ss.settings.read_only, on_status=on_status, on_token=on_token)
+            status_box.update(label="Failed" if turn.error else "Done", state="error" if turn.error else "complete")
+        save_conv()
         st.rerun()
 
 
-if __name__ == "__main__":
-    main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# """
-# app.py — QueryMind v2 · Full-featured Conversational SQL Assistant
-# """
-
-# from __future__ import annotations
-# import io
-# import os
-# import time
-# import pandas as pd
-# import streamlit as st
-# from dotenv import load_dotenv
-
-# from database  import init_db, DB_PATH, DatabaseManager
-# from agent     import ConversationalSQLAgent, MODIFICATION_META, AgentResponse
-# from charts    import build_chart, chart_type_label
-# from persistence import (save_session, list_sessions, load_session, delete_session,
-#                           load_bookmarks, add_bookmark, remove_bookmark)
-
-# load_dotenv()
-
-# # ── Page config ────────────────────────────────────────────────────────────────
-# st.set_page_config(
-#     page_title="QueryMind",
-#     page_icon="🧠",
-#     layout="wide",
-#     initial_sidebar_state="expanded",
-# )
-
-# # ── CSS ────────────────────────────────────────────────────────────────────────
-# st.markdown("""
-# <style>
-# @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
-# :root {
-#   --bg:#0d0f14; --surface:#141720; --surface2:#1c2030; --border:#252a3a;
-#   --accent:#7c6af7; --accent2:#4af0c8; --text:#e2e8f0; --muted:#64748b;
-#   --code-bg:#0a0c10; --success:#10b981; --warn:#f59e0b; --error:#ef4444;
-# }
-# html,body,[data-testid="stAppViewContainer"]{background:var(--bg)!important;
-#   font-family:'Space Grotesk',sans-serif;color:var(--text);}
-# [data-testid="stSidebar"]{background:var(--surface)!important;border-right:1px solid var(--border);}
-# #MainMenu,footer,header{visibility:hidden;}
-# [data-testid="stToolbar"]{display:none;}
-
-# /* Header */
-# .qm-header{display:flex;align-items:center;gap:14px;padding:20px 0 8px;
-#   border-bottom:1px solid var(--border);margin-bottom:24px;}
-# .qm-logo{font-size:2rem;background:linear-gradient(135deg,var(--accent),var(--accent2));
-#   -webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-# .qm-title{font-size:1.5rem;font-weight:700;letter-spacing:-.02em;color:var(--text);margin:0;}
-# .qm-sub{font-size:.75rem;color:var(--muted);font-family:'JetBrains Mono',monospace;margin:0;}
-
-# /* Chat bubbles */
-# .msg-user{display:flex;justify-content:flex-end;margin:10px 0;}
-# .msg-user-bubble{background:linear-gradient(135deg,#312e81,#1e1b4b);border:1px solid #4338ca;
-#   border-radius:18px 18px 4px 18px;padding:11px 16px;max-width:75%;font-size:.91rem;color:#e0e7ff;}
-# .msg-ai{display:flex;justify-content:flex-start;margin:10px 0;}
-# .msg-ai-inner{max-width:93%;background:var(--surface2);border:1px solid var(--border);
-#   border-radius:4px 18px 18px 18px;padding:13px 16px;}
-# .msg-ai-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:9px;}
-
-# /* Badges */
-# .mod-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;
-#   font-size:.7rem;font-weight:600;font-family:'JetBrains Mono',monospace;
-#   letter-spacing:.04em;text-transform:uppercase;}
-# .cte-badge{background:rgba(74,240,200,.12);border:1px solid rgba(74,240,200,.3);
-#   color:#4af0c8;padding:2px 8px;border-radius:10px;font-size:.68rem;
-#   font-family:'JetBrains Mono',monospace;}
-# .heal-badge{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);
-#   color:#34d399;padding:2px 8px;border-radius:10px;font-size:.68rem;
-#   font-family:'JetBrains Mono',monospace;}
-
-# /* Confidence bar */
-# .conf-row{display:flex;align-items:center;gap:8px;margin-top:4px;}
-# .conf-bar-bg{flex:1;height:4px;background:#1c2030;border-radius:2px;max-width:120px;}
-# .conf-bar{height:4px;border-radius:2px;}
-# .conf-lbl{font-size:.7rem;font-family:'JetBrains Mono',monospace;color:var(--muted);}
-
-# /* SQL block */
-# .sql-block{background:var(--code-bg);border:1px solid var(--border);
-#   border-left:3px solid var(--accent);border-radius:8px;padding:13px 15px;
-#   font-family:'JetBrains Mono',monospace;font-size:.81rem;color:#a5f3fc;
-#   white-space:pre-wrap;word-break:break-word;margin:7px 0;}
-# .sql-explanation{font-size:.84rem;color:#94a3b8;margin:5px 0;line-height:1.5;}
-
-# /* Chips */
-# .changes-row{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px;}
-# .change-chip{background:rgba(124,106,247,.1);border:1px solid rgba(124,106,247,.3);
-#   color:#c4b5fd;border-radius:12px;padding:2px 9px;font-size:.73rem;
-#   font-family:'JetBrains Mono',monospace;}
-
-# /* Context note */
-# .ctx-note{background:rgba(74,240,200,.05);border:1px solid rgba(74,240,200,.18);
-#   border-radius:7px;padding:7px 11px;font-size:.76rem;color:#6ee7b7;margin-top:7px;
-#   font-family:'JetBrains Mono',monospace;}
-
-# /* Ambiguity */
-# .amb-box{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.3);
-#   border-radius:8px;padding:10px 14px;color:#fbbf24;font-size:.84rem;margin:8px 0;}
-
-# /* Error */
-# .err-block{background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.28);
-#   border-radius:8px;padding:9px 13px;color:#fca5a5;font-size:.82rem;
-#   font-family:'JetBrains Mono',monospace;margin:7px 0;}
-
-# /* Result */
-# .result-hdr{font-size:.76rem;color:var(--muted);font-family:'JetBrains Mono',monospace;
-#   margin:10px 0 3px;display:flex;align-items:center;gap:7px;}
-# .result-cnt{background:rgba(16,185,129,.13);border:1px solid rgba(16,185,129,.28);
-#   color:#34d399;padding:2px 8px;border-radius:10px;font-size:.7rem;}
-# .no-result{color:#f59e0b;font-size:.78rem;font-family:'JetBrains Mono',monospace;
-#   margin:8px 0;padding:8px 12px;background:rgba(245,158,11,.07);
-#   border:1px solid rgba(245,158,11,.2);border-radius:7px;}
-
-# /* Plan */
-# .plan-block{background:var(--code-bg);border:1px solid var(--border);border-radius:7px;
-#   padding:10px 13px;font-family:'JetBrains Mono',monospace;font-size:.74rem;
-#   color:#64748b;white-space:pre-wrap;}
-
-# /* Input */
-# .stTextInput>div>div>input{background:var(--surface2)!important;
-#   border:1px solid var(--border)!important;border-radius:12px!important;
-#   color:var(--text)!important;font-family:'Space Grotesk',sans-serif!important;
-#   font-size:.92rem!important;padding:13px 17px!important;}
-# .stTextInput>div>div>input:focus{border-color:var(--accent)!important;
-#   box-shadow:0 0 0 2px rgba(124,106,247,.18)!important;}
-# .stTextArea textarea{background:var(--surface2)!important;border:1px solid var(--border)!important;
-#   color:var(--text)!important;font-family:'JetBrains Mono',monospace!important;font-size:.8rem!important;}
-
-# /* Buttons */
-# .stButton>button{background:linear-gradient(135deg,var(--accent),#5b4bd4)!important;
-#   color:#fff!important;border:none!important;border-radius:9px!important;
-#   font-family:'Space Grotesk',sans-serif!important;font-weight:600!important;
-#   transition:opacity .2s!important;}
-# .stButton>button:hover{opacity:.86!important;}
-
-# /* Stat cards */
-# .stat-row{display:flex;gap:8px;margin:14px 0;}
-# .stat-card{flex:1;background:var(--surface2);border:1px solid var(--border);
-#   border-radius:10px;padding:11px;text-align:center;}
-# .stat-val{font-size:1.5rem;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));
-#   -webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-# .stat-lbl{font-size:.68rem;color:var(--muted);margin-top:1px;}
-
-# /* Sidebar section label */
-# .sb-sec{font-size:.68rem;font-family:'JetBrains Mono',monospace;color:var(--muted);
-#   text-transform:uppercase;letter-spacing:.08em;margin:16px 0 6px;}
-
-# /* History item */
-# .hist-item{background:var(--surface2);border:1px solid var(--border);border-radius:7px;
-#   padding:7px 10px;font-size:.78rem;color:#cbd5e1;margin-bottom:4px;cursor:pointer;
-#   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-
-# /* Schema tree */
-# .schema-tbl{font-size:.76rem;color:#7c6af7;font-family:'JetBrains Mono',monospace;
-#   font-weight:600;margin:6px 0 2px;}
-# .schema-col{font-size:.72rem;color:#64748b;font-family:'JetBrains Mono',monospace;
-#   padding-left:12px;}
-# .schema-type{color:#4af0c8;}
-
-# /* DB badge */
-# .db-badge{background:rgba(124,106,247,.1);border:1px solid rgba(124,106,247,.25);
-#   border-radius:8px;padding:5px 10px;font-size:.72rem;color:#a78bfa;
-#   font-family:'JetBrains Mono',monospace;margin-bottom:8px;}
-
-# /* Dataframe */
-# [data-testid="stDataFrame"]{border-radius:8px;border:1px solid var(--border)!important;overflow:hidden;}
-# </style>
-# """, unsafe_allow_html=True)
-
-
-# # ── Helpers ────────────────────────────────────────────────────────────────────
-
-# def _hex_rgb(h: str) -> str:
-#     h = h.lstrip("#")
-#     return ",".join(str(int(h[i:i+2], 16)) for i in (0, 2, 4))
-
-
-# def _mod_badge(mod: str) -> str:
-#     m = MODIFICATION_META.get(mod, MODIFICATION_META["new"])
-#     c, icon, label = m["color"], m["icon"], m["label"]
-#     return (f"<span class='mod-badge' style='background:rgba({_hex_rgb(c)},.14);"
-#             f"border:1px solid rgba({_hex_rgb(c)},.35);color:{c}'>{icon} {label}</span>")
-
-
-# def _conf_bar(conf: float) -> str:
-#     pct = int(conf * 100)
-#     color = "#10b981" if pct >= 80 else "#f59e0b" if pct >= 60 else "#ef4444"
-#     return (f"<div class='conf-row'>"
-#             f"<span class='conf-lbl'>confidence</span>"
-#             f"<div class='conf-bar-bg'><div class='conf-bar' "
-#             f"style='width:{pct}%;background:{color}'></div></div>"
-#             f"<span class='conf-lbl'>{pct}%</span></div>")
-
-
-# def _csv_bytes(df: pd.DataFrame) -> bytes:
-#     return df.to_csv(index=False).encode()
-
-
-# def _xlsx_bytes(df: pd.DataFrame) -> bytes:
-#     buf = io.BytesIO()
-#     with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
-#         df.to_excel(w, index=False)
-#     return buf.getvalue()
-
-
-# # ── Session-state init ─────────────────────────────────────────────────────────
-
-# def _init_state():
-#     if "db_manager" not in st.session_state:
-#         dm = DatabaseManager()
-#         with st.spinner("Initialising database…"):
-#             init_db(DB_PATH)
-#         st.session_state.db_manager = dm
-
-#     if "agent" not in st.session_state:
-#         dm = st.session_state.db_manager
-#         st.session_state.agent = ConversationalSQLAgent(
-#             schema  = dm.get_schema_description(),
-#             api_key = os.environ.get("GROQ_API_KEY"),
-#         )
-
-#     defaults = {
-#         "chat_log":       [],
-#         "bookmarks":      load_bookmarks(),
-#         "show_charts":    True,
-#         "show_plan":      False,
-#         "prefill":        "",
-#         "session_name":   "",
-#     }
-#     for k, v in defaults.items():
-#         if k not in st.session_state:
-#             st.session_state[k] = v
-
-
-# # ── Pending operations (re-run SQL, auto-heal, bookmark toggle) ────────────────
-
-# def _handle_pending():
-#     # Re-run with edited SQL
-#     if "rerun_idx" in st.session_state:
-#         i   = st.session_state.pop("rerun_idx")
-#         sql = st.session_state.pop(f"rerun_sql_{i}", None)
-#         if sql and i < len(st.session_state.chat_log):
-#             _execute_and_update(i, sql)
-
-#     # Auto-heal SQL
-#     if "heal_idx" in st.session_state:
-#         i   = st.session_state.pop("heal_idx")
-#         if i < len(st.session_state.chat_log):
-#             entry  = st.session_state.chat_log[i]
-#             healed = st.session_state.agent.self_heal_sql(
-#                 entry["current_sql"], entry["db_error"] or "Unknown error"
-#             )
-#             if not healed.error and healed.sql:
-#                 entry["response"].sql         = healed.sql
-#                 entry["response"].explanation = healed.explanation
-#                 entry["response"].changes_made= healed.changes_made
-#                 entry["response"].context_notes = healed.context_notes
-#                 entry["current_sql"] = healed.sql
-#                 entry["healed"]      = True
-#                 _execute_and_update(i, healed.sql, update_resp=False)
-
-#     # Bookmark toggle
-#     if "bm_toggle_idx" in st.session_state:
-#         i = st.session_state.pop("bm_toggle_idx")
-#         if i < len(st.session_state.chat_log):
-#             entry = st.session_state.chat_log[i]
-#             resp  = entry["response"]
-#             if entry.get("bookmarked"):
-#                 st.session_state.bookmarks = remove_bookmark(resp.sql)
-#                 entry["bookmarked"] = False
-#             else:
-#                 st.session_state.bookmarks = add_bookmark(
-#                     entry["user"], resp.sql, resp.explanation
-#                 )
-#                 entry["bookmarked"] = True
-
-
-# def _execute_and_update(i: int, sql: str, update_resp: bool = True):
-#     entry = st.session_state.chat_log[i]
-#     dm    = st.session_state.db_manager
-#     rows, cols, db_err = dm.run_query(sql)
-#     df = pd.DataFrame(rows, columns=cols) if not db_err and rows else \
-#          (pd.DataFrame() if not db_err else None)
-#     entry["current_sql"] = sql
-#     entry["df"]          = df
-#     entry["db_error"]    = db_err
-#     if update_resp:
-#         entry["response"].sql = sql
-#     # Execution plan
-#     if not db_err:
-#         entry["plan"] = dm.get_execution_plan(sql)
-#     else:
-#         entry["plan"] = None
-
-
-# # ── Sidebar ────────────────────────────────────────────────────────────────────
-
-# def render_sidebar():
-#     agent: ConversationalSQLAgent = st.session_state.agent
-#     dm:    DatabaseManager        = st.session_state.db_manager
-
-#     with st.sidebar:
-#         st.markdown("""
-# <div style='text-align:center;padding:8px 0 16px'>
-#   <div style='font-size:2rem'>🧠</div>
-#   <div style='font-weight:700;font-size:1.05rem;letter-spacing:-.01em'>QueryMind v2</div>
-#   <div style='font-size:.68rem;color:#64748b;font-family:JetBrains Mono'>
-#     Groq · llama-3.3-70b-versatile
-#   </div>
-# </div>""", unsafe_allow_html=True)
-
-#         # ── API key ──────────────────────────────────────────────────────────
-#         st.markdown("<div class='sb-sec'>API Key</div>", unsafe_allow_html=True)
-#         key = st.text_input("Groq API Key", value=os.environ.get("GROQ_API_KEY",""),
-#                             type="password", placeholder="gsk_…", label_visibility="collapsed")
-#         if key and key != os.environ.get("GROQ_API_KEY",""):
-#             os.environ["GROQ_API_KEY"] = key
-#             st.session_state.pop("agent", None)
-#             st.rerun()
-
-#         # ── Stats ────────────────────────────────────────────────────────────
-#         n_q = len(st.session_state.chat_log)
-#         n_t = agent.turn_count
-#         n_r = agent.calls_used
-#         st.markdown(f"""
-# <div class='stat-row'>
-#   <div class='stat-card'><div class='stat-val'>{n_t}</div><div class='stat-lbl'>Turns</div></div>
-#   <div class='stat-card'><div class='stat-val'>{n_q}</div><div class='stat-lbl'>Queries</div></div>
-#   <div class='stat-card'><div class='stat-val'>{n_r}/25</div><div class='stat-lbl'>API/min</div></div>
-# </div>""", unsafe_allow_html=True)
-
-#         # ── Database ─────────────────────────────────────────────────────────
-#         st.markdown("<div class='sb-sec'>Database</div>", unsafe_allow_html=True)
-#         st.markdown(f"<div class='db-badge'>📦 {dm.label}</div>", unsafe_allow_html=True)
-
-#         db_tab, upload_tab, ext_tab = st.tabs(["Default", "Upload", "External"])
-
-#         with db_tab:
-#             if st.button("Use E-Commerce DB", use_container_width=True):
-#                 dm.use_default()
-#                 agent.update_schema(dm.get_schema_description())
-#                 st.session_state.chat_log = []
-#                 agent.reset()
-#                 st.rerun()
-
-#         with upload_tab:
-#             uploaded = st.file_uploader(
-#                 "CSV / XLSX / SQLite",
-#                 type=["csv","xlsx","xls","db","sqlite","sqlite3"],
-#                 label_visibility="collapsed",
-#             )
-#             if uploaded:
-#                 key_u = f"upload_{uploaded.name}_{uploaded.size}"
-#                 if st.session_state.get("last_upload_key") != key_u:
-#                     ok, msg = dm.upload_file(uploaded.read(), uploaded.name)
-#                     st.session_state["last_upload_key"] = key_u
-#                     if ok:
-#                         agent.update_schema(dm.get_schema_description())
-#                         st.session_state.chat_log = []
-#                         agent.reset()
-#                         st.toast(f"✅ {msg}")
-#                         st.rerun()
-#                     else:
-#                         st.error(msg)
-
-#         with ext_tab:
-#             conn_str = st.text_input(
-#                 "Connection string",
-#                 placeholder="postgresql://user:pass@host:5432/db",
-#                 label_visibility="collapsed",
-#             )
-#             if st.button("Connect", use_container_width=True) and conn_str:
-#                 ok, msg = dm.connect_external(conn_str)
-#                 if ok:
-#                     agent.update_schema(dm.get_schema_description())
-#                     st.session_state.chat_log = []
-#                     agent.reset()
-#                     st.toast(f"✅ {msg}")
-#                     st.rerun()
-#                 else:
-#                     st.error(msg)
-
-#         # ── Settings ─────────────────────────────────────────────────────────
-#         st.markdown("<div class='sb-sec'>Display</div>", unsafe_allow_html=True)
-#         st.session_state.show_charts = st.toggle("Auto-charts", value=st.session_state.show_charts)
-#         st.session_state.show_plan   = st.toggle("Execution plan", value=st.session_state.show_plan)
-
-#         # ── Examples ─────────────────────────────────────────────────────────
-#         st.markdown("<div class='sb-sec'>Examples</div>", unsafe_allow_html=True)
-#         examples = [
-#             "Show total revenue by product category",
-#             "Also include the number of orders",
-#             "Now only for Electronics",
-#             "Group it by month instead",
-#             "Include all years not just 2023",
-#             "Which of those products have rating above 4?",
-#             "Show the top 5 customers by total spend",
-#             "What is the average order value per region?",
-#             "Find products with stock below 100",
-#         ]
-#         for ex in examples:
-#             if st.button(ex, key=f"ex_{ex[:18]}", use_container_width=True):
-#                 st.session_state.prefill = ex
-#                 st.rerun()
-
-#         # ── Query history ─────────────────────────────────────────────────────
-#         if st.session_state.chat_log:
-#             st.markdown("<div class='sb-sec'>Query History</div>", unsafe_allow_html=True)
-#             for j, entry in enumerate(reversed(st.session_state.chat_log[-10:])):
-#                 label = entry["user"][:45] + ("…" if len(entry["user"]) > 45 else "")
-#                 if st.button(f"↩ {label}", key=f"hist_{j}", use_container_width=True):
-#                     st.session_state.prefill = entry["user"]
-#                     st.rerun()
-
-#         # ── Bookmarks ─────────────────────────────────────────────────────────
-#         bm = st.session_state.bookmarks
-#         if bm:
-#             st.markdown("<div class='sb-sec'>Bookmarks</div>", unsafe_allow_html=True)
-#             for j, b in enumerate(bm[:8]):
-#                 lbl = b["question"][:40] + ("…" if len(b["question"]) > 40 else "")
-#                 if st.button(f"⭐ {lbl}", key=f"bm_{j}", use_container_width=True):
-#                     st.session_state.prefill = b["question"]
-#                     st.rerun()
-
-#         # ── Schema explorer ───────────────────────────────────────────────────
-#         st.markdown("<div class='sb-sec'>Schema Explorer</div>", unsafe_allow_html=True)
-#         with st.expander("View tables & columns", expanded=False):
-#             tree = dm.get_schema_tree()
-#             parts = []
-#             for tbl, cols in tree.items():
-#                 parts.append(f"<div class='schema-tbl'>▸ {tbl}</div>")
-#                 for c in cols:
-#                     parts.append(f"<div class='schema-col'>{c['name']} "
-#                                 f"<span class='schema-type'>({c['type']})</span></div>")
-#             if parts:
-#                 st.markdown("".join(parts), unsafe_allow_html=True)
-#             for tbl in tree:
-#                 if st.button(f"Sample {tbl}", key=f"smpl_{tbl}", use_container_width=True):
-#                     st.session_state.prefill = f"Show me 5 sample rows from {tbl}"
-#                     st.rerun()
-
-#         # ── Sessions ──────────────────────────────────────────────────────────
-#         st.markdown("<div class='sb-sec'>Sessions</div>", unsafe_allow_html=True)
-#         with st.expander("Save / Load", expanded=False):
-#             sname = st.text_input("Session name", placeholder="my-analysis",
-#                                   label_visibility="collapsed")
-#             if st.button("💾 Save session", use_container_width=True):
-#                 if st.session_state.chat_log:
-#                     slug = save_session(st.session_state.chat_log, sname or None)
-#                     st.toast(f"✅ Saved as '{slug}'")
-#                 else:
-#                     st.warning("Nothing to save yet.")
-
-#             sessions = list_sessions()
-#             if sessions:
-#                 options = {f"{s['name']} ({s['turns']} turns)": s["filename"]
-#                            for s in sessions}
-#                 chosen = st.selectbox("Load session", list(options.keys()),
-#                                       label_visibility="collapsed")
-#                 c1, c2 = st.columns(2)
-#                 with c1:
-#                     if st.button("📂 Load", use_container_width=True):
-#                         log = load_session(options[chosen])
-#                         st.session_state.chat_log = log
-#                         agent.reset()
-#                         st.toast(f"✅ Loaded '{chosen}'")
-#                         st.rerun()
-#                 with c2:
-#                     if st.button("🗑 Delete", use_container_width=True):
-#                         delete_session(options[chosen])
-#                         st.toast("Deleted.")
-#                         st.rerun()
-
-#         # ── Reset ─────────────────────────────────────────────────────────────
-#         st.markdown("<hr style='border-color:#252a3a;margin:16px 0'>", unsafe_allow_html=True)
-#         if st.button("🔄 Reset conversation", use_container_width=True):
-#             agent.reset(); st.session_state.chat_log = []
-#             st.session_state.pop("last_upload_key", None)
-#             st.rerun()
-
-
-# # ── Message renderer ───────────────────────────────────────────────────────────
-
-# def render_message(i: int, entry: dict):
-#     resp: AgentResponse = entry["response"]
-#     df:   pd.DataFrame | None = entry.get("df")
-#     db_err  = entry.get("db_error")
-#     elapsed = entry.get("elapsed", 0)
-
-#     # ── User bubble
-#     st.markdown(f"""
-# <div class='msg-user'>
-#   <div class='msg-user-bubble'>💬 {entry['user']}</div>
-# </div>""", unsafe_allow_html=True)
-
-#     # ── AI bubble
-#     if resp.error:
-#         st.markdown(f"""
-# <div class='msg-ai'>
-#   <div class='msg-ai-inner'>
-#     <div class='err-block'>⚠ Agent error: {resp.error}</div>
-#   </div>
-# </div>""", unsafe_allow_html=True)
-#         return
-
-#     # Badges
-#     extra_badges = ""
-#     if resp.uses_cte:
-#         extra_badges += "<span class='cte-badge'>⛓ CTE</span> "
-#     if entry.get("healed"):
-#         extra_badges += "<span class='heal-badge'>🔧 Auto-fixed</span>"
-
-#     # Changes chips
-#     chips_html = ""
-#     if resp.changes_made:
-#         chips = "".join(f"<span class='change-chip'>{c}</span>" for c in resp.changes_made)
-#         chips_html = f"<div class='changes-row'>{chips}</div>"
-
-#     # Context note
-#     ctx_html = ""
-#     if resp.context_notes:
-#         ctx_html = f"<div class='ctx-note'>🔗 {resp.context_notes}</div>"
-
-#     # Ambiguity
-#     amb_html = ""
-#     if resp.is_ambiguous and resp.clarifying_question:
-#         amb_html = (f"<div class='amb-box'>❓ <b>Did you mean:</b> "
-#                     f"{resp.clarifying_question}<br>"
-#                     f"<small>Showing best-guess results below.</small></div>")
-
-#     st.markdown(f"""
-# <div class='msg-ai'>
-#   <div class='msg-ai-inner'>
-#     <div class='msg-ai-meta'>
-#       {_mod_badge(resp.modification_type)}
-#       {extra_badges}
-#       <span style='font-size:.72rem;color:#475569;margin-left:auto;
-#         font-family:JetBrains Mono'>{elapsed:.2f}s</span>
-#     </div>
-#     {_conf_bar(resp.confidence)}
-#     {amb_html}
-#     <div class='sql-explanation'>{resp.explanation}</div>
-#     <div class='sql-block'>{entry['current_sql']}</div>
-#     {chips_html}
-#     {ctx_html}
-#   </div>
-# </div>""", unsafe_allow_html=True)
-
-#     # ── SQL editor
-#     with st.expander("✏️ Edit & Re-run SQL", expanded=False):
-#         edited = st.text_area(
-#             "SQL editor", value=entry["current_sql"],
-#             key=f"sql_edit_{i}", height=110, label_visibility="collapsed"
-#         )
-#         c1, c2 = st.columns([1, 1])
-#         with c1:
-#             if st.button("▶ Re-run", key=f"rerun_btn_{i}", use_container_width=True):
-#                 st.session_state[f"rerun_sql_{i}"] = edited
-#                 st.session_state["rerun_idx"] = i
-#                 st.rerun()
-
-#     # ── Results
-#     if db_err:
-#         st.markdown(f"<div class='err-block'>⚠ SQL error: {db_err}</div>",
-#                     unsafe_allow_html=True)
-#         if st.button("🔧 Auto-fix SQL", key=f"heal_btn_{i}", use_container_width=False):
-#             st.session_state["heal_idx"] = i
-#             st.rerun()
-
-#     elif df is not None:
-#         if df.empty:
-#             st.markdown("<div class='no-result'>⚠ Query returned 0 rows</div>",
-#                         unsafe_allow_html=True)
-#         else:
-#             n = len(df)
-#             ctype = chart_type_label(df) if st.session_state.show_charts else ""
-#             ctype_html = f"<span style='color:#4af0c8;font-size:.7rem'>{ctype}</span>" if ctype else ""
-#             st.markdown(
-#                 f"<div class='result-hdr'>Results "
-#                 f"<span class='result-cnt'>{n} row{'s' if n!=1 else ''}</span>"
-#                 f"{ctype_html}</div>",
-#                 unsafe_allow_html=True,
-#             )
-#             st.dataframe(df, width="stretch", hide_index=True)
-
-#             # Export buttons
-#             ce1, ce2, _ = st.columns([1, 1, 4])
-#             with ce1:
-#                 st.download_button(
-#                     "📥 CSV", _csv_bytes(df),
-#                     file_name=f"query_{i+1}.csv", mime="text/csv",
-#                     key=f"dl_csv_{i}", use_container_width=True,
-#                 )
-#             with ce2:
-#                 st.download_button(
-#                     "📥 Excel", _xlsx_bytes(df),
-#                     file_name=f"query_{i+1}.xlsx",
-#                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-#                     key=f"dl_xlsx_{i}", use_container_width=True,
-#                 )
-
-#             # Auto chart
-#             if st.session_state.show_charts:
-#                 fig = build_chart(df, resp.explanation)
-#                 if fig:
-#                     st.plotly_chart(fig, use_container_width=True, key=f"chart_{i}")
-
-#     # ── Execution plan
-#     plan = entry.get("plan")
-#     if st.session_state.show_plan and plan and not db_err:
-#         with st.expander("🔍 Execution Plan", expanded=False):
-#             st.markdown(f"<div class='plan-block'>{plan}</div>",
-#                         unsafe_allow_html=True)
-
-#     # ── Bookmark button
-#     bm_label = "⭐ Bookmarked" if entry.get("bookmarked") else "☆ Bookmark"
-#     if st.button(bm_label, key=f"bm_btn_{i}", use_container_width=False):
-#         st.session_state["bm_toggle_idx"] = i
-#         st.rerun()
-
-#     st.markdown("<hr style='border-color:#1c2030;margin:4px 0'>", unsafe_allow_html=True)
-
-
-# # ── Chat log ───────────────────────────────────────────────────────────────────
-
-# def render_chat_log():
-#     for i, entry in enumerate(st.session_state.chat_log):
-#         render_message(i, entry)
-
-
-# # ── Input area ─────────────────────────────────────────────────────────────────
-
-# def render_input():
-#     prefill = st.session_state.pop("prefill", "")
-#     c1, c2  = st.columns([6, 1])
-#     with c1:
-#         user_input = st.text_input(
-#             "query", label_visibility="collapsed",
-#             value=prefill,
-#             placeholder="Ask anything… ('Show revenue by category', 'Break it down by month', 'Only Electronics'…)",
-#             key="main_input",
-#         )
-#     with c2:
-#         submit = st.button("Ask ↵", use_container_width=True)
-
-#     return user_input, submit
-
-
-# # ── Process new message ────────────────────────────────────────────────────────
-
-# def process_message(user_input: str):
-#     agent: ConversationalSQLAgent = st.session_state.agent
-#     dm:    DatabaseManager        = st.session_state.db_manager
-
-#     with st.spinner("Thinking…"):
-#         t0   = time.time()
-#         resp = agent.chat(user_input.strip())
-#         elapsed = time.time() - t0
-
-#     df, db_err, plan = None, None, None
-
-#     if not resp.error and resp.sql:
-#         rows, cols, db_err = dm.run_query(resp.sql)
-
-#         # Auto-heal on first failure
-#         if db_err and not resp.error:
-#             healed = agent.self_heal_sql(resp.sql, db_err)
-#             if not healed.error and healed.sql and healed.sql != resp.sql:
-#                 rows, cols, db_err2 = dm.run_query(healed.sql)
-#                 if not db_err2:
-#                     resp.sql         = healed.sql
-#                     resp.explanation = healed.explanation
-#                     resp.changes_made= healed.changes_made
-#                     db_err           = db_err2
-#                     rows, cols       = rows, cols
-
-#         if not db_err and rows:
-#             df = pd.DataFrame(rows, columns=cols)
-#         elif not db_err:
-#             df = pd.DataFrame()
-
-#         if not db_err:
-#             plan = dm.get_execution_plan(resp.sql)
-
-#     st.session_state.chat_log.append({
-#         "user":        user_input.strip(),
-#         "response":    resp,
-#         "df":          df,
-#         "db_error":    db_err,
-#         "elapsed":     round(elapsed, 2),
-#         "current_sql": resp.sql,
-#         "bookmarked":  False,
-#         "healed":      False,
-#         "plan":        plan,
-#     })
-
-
-# # ── Welcome screen ─────────────────────────────────────────────────────────────
-
-# def render_welcome():
-#     st.markdown("""
-# <div style='text-align:center;padding:44px 20px 24px'>
-#   <div style='font-size:3.2rem;margin-bottom:14px'>💬</div>
-#   <div style='font-size:1.1rem;font-weight:600;color:#e2e8f0;margin-bottom:8px'>
-#     Ask anything about the database
-#   </div>
-#   <div style='font-size:.84rem;color:#64748b;max-width:500px;margin:0 auto;line-height:1.7'>
-#     QueryMind understands follow-up questions, pronoun references, and query modifications.
-#     Results are auto-charted, editable, and exportable.
-#   </div>
-#   <div style='margin-top:24px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center'>
-#     <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-#       padding:8px 14px;font-size:.79rem;color:#94a3b8'>📦 "Show revenue by category"</div>
-#     <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-#       padding:8px 14px;font-size:.79rem;color:#94a3b8'>➕ "Break it down by month"</div>
-#     <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-#       padding:8px 14px;font-size:.79rem;color:#94a3b8'>🎯 "Just Electronics in 2023"</div>
-#     <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-#       padding:8px 14px;font-size:.79rem;color:#94a3b8'>🔗 "Which have rating > 4?"</div>
-#     <div style='background:#141720;border:1px solid #252a3a;border-radius:9px;
-#       padding:8px 14px;font-size:.79rem;color:#94a3b8'>📥 Upload your own CSV / SQLite</div>
-#   </div>
-# </div>""", unsafe_allow_html=True)
-
-
-# # ── Main ───────────────────────────────────────────────────────────────────────
-
-# def main():
-#     _init_state()
-#     _handle_pending()
-
-#     # Header
-#     st.markdown("""
-# <div class='qm-header'>
-#   <div class='qm-logo'>🧠</div>
-#   <div>
-#     <p class='qm-title'>QueryMind <span style='font-size:.9rem;color:#6366f1'>v2</span></p>
-#     <p class='qm-sub'>Conversational SQL · Groq · llama-3.3-70b-versatile</p>
-#   </div>
-# </div>""", unsafe_allow_html=True)
-
-#     # API key guard
-#     if not os.environ.get("GROQ_API_KEY"):
-#         st.markdown("""
-# <div style='text-align:center;padding:60px 20px'>
-#   <div style='font-size:2.8rem;margin-bottom:14px'>🔑</div>
-#   <div style='font-size:1rem;color:#94a3b8;margin-bottom:6px'>No API key detected</div>
-#   <div style='font-size:.83rem;color:#64748b'>
-#     Add your <code style='color:#7c6af7'>GROQ_API_KEY</code> in the sidebar
-#     or create a <code style='color:#7c6af7'>.env</code> file.
-#   </div>
-# </div>""", unsafe_allow_html=True)
-#         render_sidebar()
-#         return
-
-#     render_sidebar()
-
-#     if not st.session_state.chat_log:
-#         render_welcome()
-
-#     render_chat_log()
-
-#     user_input, submit = render_input()
-
-#     if submit and user_input.strip():
-#         process_message(user_input)
-#         st.rerun()
-
-
-# if __name__ == "__main__":
-#     main()
+def workbench_view() -> None:
+    ss = st.session_state
+    if ss.db is None:
+        st.info("Connect a database first.")
+        return
+    header(compact=True)
+    st.caption("Write or paste SQL and run it yourself. The same safety rules apply as in chat.")
+    last = ss.conv.last_assistant()
+    default = last.sql if last and last.sql else ""
+    sql = st.text_area("SQL", value=default, height=180, key="wb_sql", label_visibility="collapsed")
+    c1, c2, c3 = st.columns([1, 1, 3])
+    run = c1.button("Run", icon=":material/play_arrow:", type="primary", width="stretch", disabled=not sql.strip())
+    explain = c2.button("Explain", icon=":material/lightbulb:", width="stretch", disabled=not sql.strip())
+    if not ss.settings.read_only:
+        c3.checkbox("I confirm this may modify data", key="wb_confirm")
+
+    if run:
+        report = ss.db.check(sql, ss.settings.read_only)
+        if not report.allowed:
+            st.error(report.reason)
+        elif not report.is_read and not ss.get("wb_confirm"):
+            st.warning("This statement modifies data. Tick the confirmation box and run again.")
+        else:
+            res = ss.db.execute(sql, read_only=ss.settings.read_only, row_limit=ss.settings.row_limit)
+            if not res.ok:
+                st.error(res.error)
+            elif res.df is not None:
+                t = Turn(role="assistant", sql=res.sql, row_count=res.rowcount, truncated=res.truncated)
+                t.set_df(res.df)
+                st.markdown(theme.tags_html([(f"{res.rowcount:,} rows", ""), (f"{res.elapsed_ms:.0f} ms", "")]), unsafe_allow_html=True)
+                render_result(t, "workbench")
+            else:
+                st.success(f"Done — {res.rowcount} row(s) affected.")
+                if res.kind == "ddl":
+                    ss.db.get_schema(refresh=True)
+        for w in report.warnings:
+            st.markdown(theme.caution_html(w), unsafe_allow_html=True)
+
+    if explain:
+        agent = get_agent()
+        if agent is None:
+            st.warning("Add an API key to use explanations.")
+        else:
+            with st.spinner("Explaining…"):
+                try:
+                    tables = ss.db.relevant_tables(sql)
+                    text = agent.llm.chat([
+                        {"role": "system", "content": f"You explain {agent.dialect_label} SQL to non-experts. Be concise: "
+                                                      "what it returns, step by step, and one optimisation tip if relevant.\n\nSchema:\n"
+                                                      + ss.db.schema_text(tables, with_samples=False)},
+                        {"role": "user", "content": sql},
+                    ])
+                    st.markdown(text)
+                except LLMError as e:
+                    st.error(str(e))
+
+
+def main() -> None:
+    init_state()
+    sidebar()
+    views = {"chat": ":material/forum: Chat", "sql": ":material/terminal: SQL workbench"}
+    view = st.segmented_control("View", list(views), format_func=views.get, default="chat", key="view",
+                                label_visibility="collapsed") or "chat"
+    if view == "chat":
+        chat_view()
+    else:
+        workbench_view()
+
+
+main()

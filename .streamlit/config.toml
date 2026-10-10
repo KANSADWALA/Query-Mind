@@ -1,0 +1,29 @@
+# QueryMind theme: cool paper, ink text, cobalt actions, navy sidebar, amber reserved for SQL.
+[theme]
+base = "light"
+primaryColor = "#2F5BEA"
+backgroundColor = "#F4F6FA"
+secondaryBackgroundColor = "#EAEFF7"
+textColor = "#1B2335"
+borderColor = "#D9E0EC"
+linkColor = "#2F5BEA"
+baseRadius = "10px"
+buttonRadius = "10px"
+showWidgetBorder = true
+font = "Instrument Sans:https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap"
+headingFont = "Bricolage Grotesque:https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&display=swap"
+codeFont = "JetBrains Mono:https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+codeBackgroundColor = "#F7F8FB"
+dataframeHeaderBackgroundColor = "#EAEFF7"
+chartCategoricalColors = ["#2F5BEA", "#F2A93B", "#1E9E8A", "#C2416B", "#7A5CDB", "#5D6A82"]
+
+[theme.sidebar]
+backgroundColor = "#13203B"
+secondaryBackgroundColor = "#1C2C4E"
+textColor = "#DCE4F2"
+primaryColor = "#4A70F2"
+borderColor = "#2B3C63"
+codeBackgroundColor = "#1C2C4E"
+
+[client]
+toolbarMode = "minimal"
