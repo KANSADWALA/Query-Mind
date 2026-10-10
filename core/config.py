@@ -85,8 +85,8 @@ class Settings:
 def key_setup_hint() -> str:
     """Explain why no API key was found."""
     if not ENV_FILE.exists():
-        return ("No `.env` file found. Create a file named `.env` in the project folder containing "
-                "`GROQ_API_KEY=your_key`, then restart the app — or paste the key in the sidebar under "
+        return ("No `.env` file found. Copy `.env.example` to `.env`, put your key in `GROQ_API_KEY=...`, "
+                "then restart the app — or paste the key in the sidebar under "
                 "🤖 Language model. Free Groq keys: console.groq.com/keys")
     return ("`.env` was found but has no API key for this provider. Set `GROQ_API_KEY=...` (provider groq) and restart, "
             "or paste the key in the sidebar under 🤖 Language model.")

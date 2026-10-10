@@ -84,11 +84,11 @@ cd "D:\My Projects\Database-assistant"
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-# create a file named .env containing:  GROQ_API_KEY=your_key   (free: console.groq.com/keys)
+copy .env.example .env         # then open .env and paste your GROQ_API_KEY (free: console.groq.com/keys)
 streamlit run app.py
 ```
 
-macOS / Linux: same steps with `source .venv/bin/activate`. Open http://localhost:8501.
+macOS / Linux: same steps with `source .venv/bin/activate` and `cp .env.example .env`. Open http://localhost:8501.
 
 > Tip: connect your own MySQL with a user that only has `SELECT` rights for an extra layer of protection.
 
@@ -135,7 +135,7 @@ scripts/download_datasets.py  Download all (or selected) catalog datasets
 tests/test_core.py            Tests on the real Chinook data with a scripted fake LLM (no API key needed)
 ```
 
-### `.env` settings (all optional except the key)
+### `.env` settings (all optional except the key; see `.env.example` for the full list)
 
 ```
 GROQ_API_KEY=your_key
