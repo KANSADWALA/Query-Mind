@@ -104,6 +104,27 @@ header[data-testid="stHeader"] { background: transparent; }
   border-left:3px solid var(--qm-amber); background:#fff; }
 .st-key-wb_sql [data-baseweb="textarea"] { background:#fff; }
 
+/* Dashboard --------------------------------------------------------------- */
+.qm-dash-title .t { font-family:var(--qm-display); font-weight:800; font-size:1.9rem; letter-spacing:-.025em; line-height:1.1;
+  color:var(--qm-ink); margin:0 0 .2rem; }
+.qm-dash-title span { color:var(--qm-muted); font-size:.82rem; }
+.qm-kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:.75rem; margin:.4rem 0 1rem; }
+.qm-kpi { background:#fff; border:1px solid var(--qm-line); border-radius:12px; padding:.85rem 1rem .8rem; }
+.qm-kpi .lbl { color:var(--qm-muted); font-size:.82rem; margin-bottom:.2rem; }
+.qm-kpi .val { font-family:var(--qm-display); font-weight:700; font-size:1.75rem; letter-spacing:-.02em; color:var(--qm-ink);
+  font-variant-numeric:tabular-nums; line-height:1.15; }
+.qm-delta { display:inline-block; margin-top:.25rem; font-size:.76rem; font-variant-numeric:tabular-nums; }
+.qm-delta.up { color:#13684F; } .qm-delta.down { color:#B42318; } .qm-delta.flat { color:var(--qm-muted); }
+.qm-chips { display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; font-size:.82rem; color:var(--qm-muted); margin:.2rem 0 .6rem; }
+.qm-chip { background:var(--qm-cobalt-soft); color:#2346B8; border-radius:999px; padding:.15rem .65rem; font-size:.8rem; }
+.qm-hint-inline { font-size:.76rem; color:var(--qm-muted); }
+.qm-db-head { display:flex; align-items:baseline; gap:.6rem; margin:1.6rem 0 .6rem; padding-top:1rem; border-top:1px solid var(--qm-line); }
+.qm-db-head:first-of-type { border-top:none; }
+.qm-db-head b { font-family:var(--qm-display); font-size:1.35rem; font-weight:800; letter-spacing:-.02em; color:var(--qm-ink); }
+.qm-db-head span { color:var(--qm-muted); font-size:.82rem; }
+.qm-db-head .dot { width:10px; height:10px; border-radius:3px; background:var(--qm-cobalt); align-self:center; }
+[data-testid="stVerticalBlockBorderWrapper"] { background:#fff; border-radius:12px; }
+
 /* Danger zone: clear all chat history ------------------------------------ */
 .st-key-danger_zone { margin-top:.6rem; }
 .st-key-clear_history button, .st-key-clear_confirm button {

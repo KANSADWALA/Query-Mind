@@ -10,6 +10,7 @@ sessions/
 data/datasets/
 data/uploads/
 data/feedback.json
+data/dashboards.json
 data/*.db
 data/*.sqlite
 

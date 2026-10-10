@@ -34,7 +34,11 @@ def _is_datelike(s: pd.Series) -> bool:
     if pd.api.types.is_datetime64_any_dtype(s):
         return True
     if _is_text(s) and any(h in str(s.name).lower() for h in DATE_HINTS):
-        parsed = pd.to_datetime(s, errors="coerce")
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            parsed = pd.to_datetime(s, errors="coerce")
         return parsed.notna().mean() > 0.8
     if pd.api.types.is_integer_dtype(s) and "year" in str(s.name).lower():
         return True
@@ -195,7 +199,7 @@ def _bar(df: pd.DataFrame, x: str, y: str, color: str | None) -> go.Figure:
     except Exception:  # older plotly
         pass
     if horizontal:
-        fig.update_yaxes(autorange="reversed", title=None)
+        fig.update_yaxes(title=None)  # px already lists the first category at the top
         fig.update_xaxes(showgrid=True)
         fig.update_layout(height=max(360, 34 * len(data) + 110), bargap=0.25)
     else:
@@ -271,13 +275,21 @@ def _pie(df: pd.DataFrame, x: str, y: str) -> go.Figure:
     fmt = _num_format(data[y])
     colors = [("#B8C0CE" if name == "Other" else PALETTE[i]) for i, name in enumerate(data[x])]  # 'Other' stays neutral
     share = data[y] / total
-    text = [f"{n}<br>{p:.1%}" if p >= 0.03 else "" for n, p in zip(data[x], share)]
+    many = len(data) > 5
+    if many:  # names go in the legend; slices show only their percentage (when big enough to read)
+        text = [f"{p:.0%}" if p >= 0.04 else "" for p in share]
+    else:
+        text = [f"{n}<br>{p:.1%}" if p >= 0.03 else "" for n, p in zip(data[x], share)]
     fig = go.Figure(go.Pie(labels=data[x], values=data[y], hole=0.55, sort=False, direction="clockwise", rotation=90,
                            marker=dict(colors=colors, line=dict(color=SURFACE, width=2)),
-                           text=text, textinfo="text", textposition="outside", textfont=dict(color=INK, size=12),
+                           text=text, textinfo="text", textposition="inside" if many else "outside",
+                           insidetextorientation="horizontal",
+                           textfont=dict(color="#FFFFFF" if many else INK, size=12),
                            hovertemplate=f"<b>%{{label}}</b><br>{pretty(y)}: %{{value:,.2f}}<br>%{{percent}} of total<extra></extra>"))
-    fig.add_annotation(text=f"<b>{_human(total, fmt)}</b><br><span style='color:{MUTED};font-size:12px'>Total {pretty(y).lower()}</span>",
-                       showarrow=False, font=dict(size=20, color=INK, family=DISPLAY_FONT), x=0.5, y=0.5)
+    label = pretty(y).lower()
+    label = label if len(label) <= 14 else label[:13] + "…"
+    fig.add_annotation(text=f"<b>{_human(total, fmt)}</b><br><span style='color:{MUTED};font-size:11px'>Total {label}</span>",
+                       showarrow=False, font=dict(size=18, color=INK, family=DISPLAY_FONT), x=0.5, y=0.5)
     fig.update_layout(showlegend=len(data) > 5, legend=dict(orientation="v", x=1.02, y=0.5, yanchor="middle"))
     return fig
 

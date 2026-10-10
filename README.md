@@ -10,7 +10,7 @@ Powered by **Groq `openai/gpt-oss-120b`** by default; any OpenAI-compatible mode
 or another provider) can be selected from the sidebar.
 
 See [PROJECT_STATEMENT.md](PROJECT_STATEMENT.md) for the problem statement and objectives, and
-[test.md](test.md) for a 143-point test plan with expected answers.
+[test.md](test.md) for a 162-point test plan with expected answers.
 
 ---
 
@@ -18,6 +18,7 @@ See [PROJECT_STATEMENT.md](PROJECT_STATEMENT.md) for the problem statement and o
 
 - [Feature overview](#feature-overview)
 - [Features in detail](#features-in-detail)
+- [Dashboard and Power BI](#dashboard-and-power-bi)
 - [Example questions](#example-questions)
 - [Real datasets included](#real-datasets-included)
 - [Adding your own databases](#adding-your-own-databases)
@@ -49,6 +50,9 @@ See [PROJECT_STATEMENT.md](PROJECT_STATEMENT.md) for the problem statement and o
 | Data sources | Six real datasets built in; add MySQL, PostgreSQL, SQLite, any SQLAlchemy URL, CSV/Excel uploads or a dataset URL |
 | Chats | One conversation per database, saved to disk, reopenable, exportable, with a "clear all history" button |
 | Transparency | The SQL, each reasoning step and an explanation are always one click away |
+| Dashboard (Power BI style) | KPI cards, date and category slicers, click-to-filter charts, pinned chat answers, customizable layout |
+| Multi-database dashboards | Side-by-side sections per database, or a merged view on a shared field found automatically (e.g. country, with "USA" = "United States") |
+| Power BI export | One-click pack: fact.csv, Excel workbook, DAX measures, Power Query script and a step-by-step rebuild guide |
 
 ---
 
@@ -169,13 +173,86 @@ compares them: 891 vs 59.
 
 ### Interface
 
+- Three tabs: **Chat**, **Dashboard** and **SQL workbench**. The selected tab stays put when you switch databases
+  or click it again.
 - A clean light theme with a navy sidebar and a large "Ask *Database* anything" header listing the tables and
   their row counts.
 - Starter questions: curated for the bundled datasets, generated from the schema for any database you add.
+- **Dashboard tab** (see [Dashboard and Power BI](#dashboard-and-power-bi)).
 - **SQL workbench** to write and run SQL yourself (same safety rules) or have any query explained.
 - Schema explorer, provider/model/reasoning-effort controls, a **Test model** button, and settings for write
   mode, row limit, retries, memory length and reasoning steps.
 - Works on phone-sized screens.
+
+---
+
+## Dashboard and Power BI
+
+The **Dashboard** tab turns the connected database into an interactive, Power BI-style report page.
+
+**What's on it**
+
+- **KPI cards** across the top (revenue, orders, customers, averages…). When a date range is selected, each card
+  shows the change versus the previous period of the same length (▲ / ▼ %).
+- **One filter row above everything:** a date range (all dates, latest 12 months, latest 3 months, or custom)
+  followed by slicers for key categories. Every KPI and chart re-calculates from the same filtered data.
+- **Click-to-filter charts:** click a bar or donut slice and every other visual filters to it, like Power BI
+  cross-filtering. The clicked chart keeps its other categories faded so you can switch selection; click again
+  or use **Clear filters** to undo. Active click filters are shown as chips.
+- **Six charts per dashboard** using the same labelled, colour-blind-safe chart styles as the chat.
+- **Pinned from chat:** any chat answer has a **Pin** button; pinned answers appear on the dashboard and re-run
+  their SQL each time.
+
+**Where the dashboard comes from**
+
+| Database | Dashboard |
+|---|---|
+| Bundled datasets | Hand-built dashboards (in [`dashboards.json`](dashboards.json)), e.g. *Music store sales* for Chinook, *Titanic passenger survival* for Titanic |
+| Any other database | Built automatically from the largest table's dates, numbers and categories |
+| Any database, with a key | **Design with AI**: the model designs the fact query, KPIs, slicers and charts from your schema; every part is checked against real data before it's used |
+
+**Customize** (expander under the dashboard): rename it, choose slicers, remove charts, add charts (type, axis,
+value, aggregation, top N, split by), or reset to the default. Changes are saved per database in
+`data/dashboards.json`.
+
+### Several databases on one dashboard
+
+The Dashboard tab has a mode switch at the top. Pick databases in **Compare with other databases** (next to the
+switch, or under **Combine with other databases** in the sidebar; both stay in sync):
+
+| Mode | What you see |
+|---|---|
+| **This database** | The normal single-database dashboard |
+| **Side by side** (default) | One section per database, each with its own KPI cards, slicers, click-to-filter charts and change vs previous period. A shared date-range control applies to all of them, relative to each database's own latest date. |
+| **Merged by a shared field** | QueryMind compares the actual values in every text column to find the field the databases share (for example `country` in Chinook, `customer_country` in Northwind and `country` in the COVID data), normalising names so "USA" = "United States", "UK" = "United Kingdom", "Czech Republic" = "Czechia". You then get KPI cards for the matched values, a grouped bar per shared value with one bar per database, a scatter of two databases' measures with their correlation, a coverage table (which values exist where), and a filter that applies to every database at once. |
+
+In Merged mode you can change the matching field and the measure for each database. When the measures have very
+different scales (dollars vs deaths, thousands vs millions), the chart automatically shows each database's share
+of its own total, so everything fits on one honest axis; **Raw values** switches back to the real numbers.
+Databases with nothing in common (for example Titanic and Chinook) are reported as such instead of being forced
+together.
+
+**Power BI pack (all databases):** one `fact_<database>.csv` per database with an added `shared_key` column, a
+`shared_keys.csv` table, the merged comparison, DAX measures for every table, and a guide to link SharedKeys to each
+fact table so one slicer filters every database in Power BI too.
+
+**Under the hood:** each dashboard is a flat *fact query* (one row per event, joined to its dimensions) plus
+KPI, slicer and chart definitions that aggregate it, exactly the shape Power BI works best with.
+
+### Open it in Power BI
+
+Click **Prepare Power BI pack** → **Download** (optionally only the filtered rows). The zip contains:
+
+| File | Use in Power BI |
+|---|---|
+| `fact.csv` | Get data → Text/CSV. The flat table every visual is built from |
+| `dashboard.xlsx` | The fact table (up to 100k rows) plus one sheet per KPI and chart with the numbers shown in QueryMind |
+| `measures.dax` | Ready-made DAX measures for the KPI cards: Modeling → New measure → paste |
+| `load_fact.pq` | Power Query (M) script that loads fact.csv with correct column types |
+| `fact_query.sql` | The SQL behind the fact table, for a live connection (MySQL, PostgreSQL, SQL Server, or SQLite via ODBC) |
+| `POWERBI_README.md` | Step-by-step instructions to rebuild this exact dashboard: which visual, axis, values, legend and slicers |
+
+Rebuilding the page in Power BI Desktop takes about 10 minutes, and cross-filtering then works there too.
 
 ---
 
@@ -344,6 +421,7 @@ Streamed answer + follow-ups ─► labelled chart, table, SQL, reasoning steps 
 ```
 app.py                        Streamlit UI: chat, workbench, sidebar, add-database forms, feedback, history
 datasets.json                 Catalog of real datasets (extensible)
+dashboards.json               Ready-made Power BI-style dashboards for the bundled datasets
 .env.example                  Settings template; copy to .env and add your key
 .streamlit/config.toml        Theme (colours, fonts)
 core/
@@ -357,16 +435,18 @@ core/
   examples.py                 Feedback store and similar-example retrieval (learning from 👍/👎)
   sources.py                  Dataset catalog (download/convert) and saved-connection registry
   charts.py                   Chart selection and labelled, colour-coded Plotly figures
+  dashboard.py                Dashboard engine: fact data, filters, KPIs, aggregation, auto/AI design, Power BI export
   config.py                   Settings from .env
 ui/theme.py                   CSS, brand mark and HTML snippets
+ui/dashboard_view.py          The Dashboard tab: KPI cards, slicers, cross-filtering charts, pins, customize, export
 scripts/download_datasets.py  Download all (or selected) catalog datasets
-tests/test_core.py            38 automated tests on real data with a scripted fake LLM (no API key needed)
-test.md                       Manual test plan: 143 checks with expected answers
+tests/test_core.py            43 automated tests on real data with a scripted fake LLM (no API key needed)
+test.md                       Manual test plan: 162 checks with expected answers
 PROJECT_STATEMENT.md          Problem statement and objectives
 ```
 
 Created while you use the app (all git-ignored): `.env`, `connections.json`, `sessions/`, `data/datasets/`,
-`data/uploads/`, `data/feedback.json`.
+`data/uploads/`, `data/feedback.json`, `data/dashboards.json`.
 
 ---
 
@@ -380,9 +460,11 @@ python -m pytest -q
 
 They cover SQL safety rules, schema profiling, follow-up context, self-correction, multi-hop reasoning,
 cross-database questions, streaming, feedback learning, running-summary memory, per-database chats, chart labels
-and colours, and dataset/connection management.
+and colours, dashboards (KPIs, filters, auto and AI designs, pins, multi-database matching and merging) and the Power BI export
+packs, and
+dataset/connection management.
 
-**Manual test plan:** [test.md](test.md) has 143 checks, including 10 questions per dataset with expected
+**Manual test plan:** [test.md](test.md) has 162 checks, including 10 questions per dataset with expected
 answers computed from the data, plus tests for every feature above.
 
 ---
@@ -390,7 +472,8 @@ answers computed from the data, plus tests for every feature above.
 ## Tech stack
 
 Python 3.10+, Streamlit, SQLAlchemy, sqlglot, pandas, Plotly, OpenAI Python SDK (any OpenAI-compatible endpoint),
-python-dotenv, PyMySQL, psycopg2. Default model: Groq `openai/gpt-oss-120b`.
+python-dotenv, openpyxl (Excel export), PyMySQL, psycopg2. Default model: Groq `openai/gpt-oss-120b`.
+Power BI Desktop is only needed to open the optional export pack.
 
 ---
 
@@ -402,3 +485,11 @@ python-dotenv, PyMySQL, psycopg2. Default model: Groq `openai/gpt-oss-120b`.
   pick up an example.
 - Query timeouts apply to MySQL and PostgreSQL; SQLite queries rely on the row limit.
 - Single-user app: there is no login or per-user permission system.
+- Dashboards load their fact table into memory (capped at 1 million rows). Large databases take a few seconds the
+  first time (Northwind, 609k rows: about 5 seconds), then stay cached for 15 minutes.
+- Power BI can't import a ready-made report file from outside Power BI, so the export pack gives you the data,
+  DAX measures, Power Query script and a step-by-step guide; rebuilding the visuals takes about 10 minutes.
+- The automatic dashboard looks at the largest table only; use **Design with AI** for databases spread across
+  many related tables.
+- Merged dashboards match values exactly after normalising case, accents and common country-name variants. Other
+  naming differences (e.g. product codes vs product names) need the matching field picked by hand.

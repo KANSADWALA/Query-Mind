@@ -1,0 +1,130 @@
+{
+  "_comment": "Ready-made dashboards for the bundled datasets. Each one: a flat 'fact' query (one row per event), KPI cards, slicers and charts that aggregate that fact table. agg = sum | mean | count | nunique | max | min | mean_pct. Any other database gets an automatic or AI-designed dashboard with the same structure.",
+  "dashboards": {
+    "chinook": {
+      "title": "Music store sales",
+      "fact_sql": "SELECT il.InvoiceLineId AS line_id, i.InvoiceId AS invoice_id, date(i.InvoiceDate) AS invoice_date, i.BillingCountry AS country, i.BillingCity AS city, c.CustomerId AS customer_id, c.FirstName || ' ' || c.LastName AS customer, e.FirstName || ' ' || e.LastName AS sales_rep, g.Name AS genre, m.Name AS media_type, ar.Name AS artist, al.Title AS album, t.Name AS track, il.Quantity AS quantity, il.UnitPrice * il.Quantity AS revenue FROM InvoiceLine il JOIN Invoice i ON i.InvoiceId = il.InvoiceId JOIN Customer c ON c.CustomerId = i.CustomerId LEFT JOIN Employee e ON e.EmployeeId = c.SupportRepId JOIN Track t ON t.TrackId = il.TrackId LEFT JOIN Genre g ON g.GenreId = t.GenreId LEFT JOIN MediaType m ON m.MediaTypeId = t.MediaTypeId JOIN Album al ON al.AlbumId = t.AlbumId JOIN Artist ar ON ar.ArtistId = al.ArtistId",
+      "date": "invoice_date",
+      "kpis": [
+        {"label": "Revenue", "col": "revenue", "agg": "sum", "format": "money"},
+        {"label": "Invoices", "col": "invoice_id", "agg": "nunique", "format": "int"},
+        {"label": "Customers", "col": "customer_id", "agg": "nunique", "format": "int"},
+        {"label": "Avg invoice value", "ratio": [{"col": "revenue", "agg": "sum"}, {"col": "invoice_id", "agg": "nunique"}], "format": "money"},
+        {"label": "Tracks sold", "col": "quantity", "agg": "sum", "format": "int"}
+      ],
+      "slicers": ["country", "genre", "sales_rep"],
+      "charts": [
+        {"title": "Revenue by month", "type": "line", "x": "invoice_date", "grain": "month", "y": "revenue", "agg": "sum", "y_label": "Revenue"},
+        {"title": "Revenue by country (top 10)", "type": "bar", "x": "country", "y": "revenue", "agg": "sum", "top": 10, "y_label": "Revenue"},
+        {"title": "Revenue by genre", "type": "pie", "x": "genre", "y": "revenue", "agg": "sum", "top": 8, "y_label": "Revenue"},
+        {"title": "Top 10 artists by revenue", "type": "bar", "x": "artist", "y": "revenue", "agg": "sum", "top": 10, "y_label": "Revenue"},
+        {"title": "Revenue by sales rep", "type": "bar", "x": "sales_rep", "y": "revenue", "agg": "sum", "y_label": "Revenue"},
+        {"title": "Tracks sold by media type", "type": "pie", "x": "media_type", "y": "quantity", "agg": "sum", "y_label": "Tracks sold"}
+      ]
+    },
+    "northwind": {
+      "title": "Trading company sales",
+      "fact_sql": "SELECT od.OrderID AS order_id, date(o.OrderDate) AS order_date, COALESCE(c.CompanyName, o.CustomerID) AS customer, COALESCE(c.Country, o.ShipCountry) AS customer_country, e.FirstName || ' ' || e.LastName AS employee, s.CompanyName AS shipper, cat.CategoryName AS category, p.ProductName AS product, sup.CompanyName AS supplier, od.Quantity AS quantity, od.UnitPrice * od.Quantity * (1 - od.Discount) AS revenue FROM \"Order Details\" od JOIN Orders o ON o.OrderID = od.OrderID LEFT JOIN Customers c ON c.CustomerID = o.CustomerID LEFT JOIN Employees e ON e.EmployeeID = o.EmployeeID LEFT JOIN Shippers s ON s.ShipperID = o.ShipVia JOIN Products p ON p.ProductID = od.ProductID LEFT JOIN Categories cat ON cat.CategoryID = p.CategoryID LEFT JOIN Suppliers sup ON sup.SupplierID = p.SupplierID",
+      "date": "order_date",
+      "kpis": [
+        {"label": "Revenue", "col": "revenue", "agg": "sum", "format": "money"},
+        {"label": "Orders", "col": "order_id", "agg": "nunique", "format": "int"},
+        {"label": "Customers", "col": "customer", "agg": "nunique", "format": "int"},
+        {"label": "Avg order value", "ratio": [{"col": "revenue", "agg": "sum"}, {"col": "order_id", "agg": "nunique"}], "format": "money"},
+        {"label": "Units sold", "col": "quantity", "agg": "sum", "format": "int"}
+      ],
+      "slicers": ["customer_country", "category", "employee"],
+      "charts": [
+        {"title": "Revenue by month", "type": "line", "x": "order_date", "grain": "month", "y": "revenue", "agg": "sum", "y_label": "Revenue"},
+        {"title": "Revenue by category", "type": "pie", "x": "category", "y": "revenue", "agg": "sum", "top": 8, "y_label": "Revenue"},
+        {"title": "Top 10 products by revenue", "type": "bar", "x": "product", "y": "revenue", "agg": "sum", "top": 10, "y_label": "Revenue"},
+        {"title": "Revenue by customer country (top 10)", "type": "bar", "x": "customer_country", "y": "revenue", "agg": "sum", "top": 10, "y_label": "Revenue"},
+        {"title": "Orders by employee", "type": "bar", "x": "employee", "y": "order_id", "agg": "nunique", "y_label": "Orders"},
+        {"title": "Orders by shipper", "type": "pie", "x": "shipper", "y": "order_id", "agg": "nunique", "y_label": "Orders"}
+      ]
+    },
+    "sakila": {
+      "title": "DVD rental revenue",
+      "fact_sql": "SELECT p.payment_id, date(p.payment_date) AS payment_date, p.amount AS revenue, 'Store ' || s.store_id AS store, cu.customer_id, cu.first_name || ' ' || cu.last_name AS customer, co.country, cat.name AS category, f.title AS film, f.rating, r.rental_id FROM payment p JOIN staff s ON s.staff_id = p.staff_id JOIN customer cu ON cu.customer_id = p.customer_id JOIN address a ON a.address_id = cu.address_id JOIN city ci ON ci.city_id = a.city_id JOIN country co ON co.country_id = ci.country_id LEFT JOIN rental r ON r.rental_id = p.rental_id LEFT JOIN inventory i ON i.inventory_id = r.inventory_id LEFT JOIN film f ON f.film_id = i.film_id LEFT JOIN film_category fc ON fc.film_id = f.film_id LEFT JOIN category cat ON cat.category_id = fc.category_id",
+      "date": "payment_date",
+      "kpis": [
+        {"label": "Revenue", "col": "revenue", "agg": "sum", "format": "money"},
+        {"label": "Rentals", "col": "rental_id", "agg": "nunique", "format": "int"},
+        {"label": "Customers", "col": "customer_id", "agg": "nunique", "format": "int"},
+        {"label": "Avg payment", "col": "revenue", "agg": "mean", "format": "money"}
+      ],
+      "slicers": ["store", "category", "rating"],
+      "charts": [
+        {"title": "Revenue by month", "type": "line", "x": "payment_date", "grain": "month", "y": "revenue", "agg": "sum", "y_label": "Revenue"},
+        {"title": "Revenue by film category", "type": "bar", "x": "category", "y": "revenue", "agg": "sum", "y_label": "Revenue"},
+        {"title": "Revenue by store", "type": "pie", "x": "store", "y": "revenue", "agg": "sum", "y_label": "Revenue"},
+        {"title": "Top 10 films by rentals", "type": "bar", "x": "film", "y": "rental_id", "agg": "nunique", "top": 10, "y_label": "Rentals"},
+        {"title": "Rentals by rating", "type": "bar", "x": "rating", "y": "rental_id", "agg": "nunique", "order": ["G", "PG", "PG-13", "R", "NC-17"], "y_label": "Rentals"},
+        {"title": "Customers by country (top 10)", "type": "bar", "x": "country", "y": "customer_id", "agg": "nunique", "top": 10, "y_label": "Customers"}
+      ]
+    },
+    "titanic": {
+      "title": "Titanic passenger survival",
+      "fact_sql": "SELECT passengerid AS passenger_id, CASE pclass WHEN 1 THEN '1st class' WHEN 2 THEN '2nd class' ELSE '3rd class' END AS class, sex, age, CASE WHEN age IS NULL THEN 'Unknown' WHEN age < 13 THEN 'Child (0-12)' WHEN age < 18 THEN 'Teen (13-17)' WHEN age < 35 THEN 'Young adult (18-34)' WHEN age < 60 THEN 'Adult (35-59)' ELSE 'Senior (60+)' END AS age_group, fare, CASE embarked WHEN 'S' THEN 'Southampton' WHEN 'C' THEN 'Cherbourg' WHEN 'Q' THEN 'Queenstown' ELSE 'Unknown' END AS port, survived, CASE survived WHEN 1 THEN 'Survived' ELSE 'Died' END AS outcome, sibsp + parch AS family_size FROM passengers",
+      "date": null,
+      "kpis": [
+        {"label": "Passengers", "col": "passenger_id", "agg": "count", "format": "int"},
+        {"label": "Survivors", "col": "survived", "agg": "sum", "format": "int"},
+        {"label": "Survival rate", "col": "survived", "agg": "mean_pct", "format": "pct"},
+        {"label": "Avg fare", "col": "fare", "agg": "mean", "format": "money"},
+        {"label": "Avg age", "col": "age", "agg": "mean", "format": "num"}
+      ],
+      "slicers": ["class", "sex", "port"],
+      "charts": [
+        {"title": "Survival rate by class", "type": "bar", "x": "class", "y": "survived", "agg": "mean_pct", "order": ["1st class", "2nd class", "3rd class"], "y_label": "Survival rate (%)"},
+        {"title": "Survival rate by sex", "type": "bar", "x": "sex", "y": "survived", "agg": "mean_pct", "y_label": "Survival rate (%)"},
+        {"title": "Survival rate by age group", "type": "bar", "x": "age_group", "y": "survived", "agg": "mean_pct", "order": ["Child (0-12)", "Teen (13-17)", "Young adult (18-34)", "Adult (35-59)", "Senior (60+)", "Unknown"], "y_label": "Survival rate (%)"},
+        {"title": "Passengers by port", "type": "pie", "x": "port", "y": "passenger_id", "agg": "count", "y_label": "Passengers"},
+        {"title": "Outcome by class", "type": "bar", "x": "class", "y": "passenger_id", "agg": "count", "color": "outcome", "order": ["1st class", "2nd class", "3rd class"], "y_label": "Passengers"},
+        {"title": "Fare distribution", "type": "histogram", "x": "fare"}
+      ]
+    },
+    "covid_latest": {
+      "title": "COVID-19 by country",
+      "fact_sql": "SELECT location AS country, continent, population, total_cases, total_deaths, total_cases_per_million, total_deaths_per_million, people_fully_vaccinated_per_hundred, gdp_per_capita, life_expectancy FROM covid_latest WHERE continent IS NOT NULL",
+      "date": null,
+      "kpis": [
+        {"label": "Countries", "col": "country", "agg": "nunique", "format": "int"},
+        {"label": "Total cases", "col": "total_cases", "agg": "sum", "format": "int"},
+        {"label": "Total deaths", "col": "total_deaths", "agg": "sum", "format": "int"},
+        {"label": "Deaths per million", "ratio": [{"col": "total_deaths", "agg": "sum"}, {"col": "population", "agg": "sum"}], "scale": 1000000, "format": "num"},
+        {"label": "Avg life expectancy", "col": "life_expectancy", "agg": "mean", "format": "num"}
+      ],
+      "slicers": ["continent"],
+      "charts": [
+        {"title": "Total cases by continent", "type": "bar", "x": "continent", "y": "total_cases", "agg": "sum", "y_label": "Total cases"},
+        {"title": "Deaths by continent", "type": "pie", "x": "continent", "y": "total_deaths", "agg": "sum", "y_label": "Deaths"},
+        {"title": "Highest deaths per million (top 10)", "type": "bar", "x": "country", "y": "total_deaths_per_million", "agg": "max", "top": 10, "y_label": "Deaths per million"},
+        {"title": "Highest cases per million (top 10)", "type": "bar", "x": "country", "y": "total_cases_per_million", "agg": "max", "top": 10, "y_label": "Cases per million"},
+        {"title": "GDP per capita vs life expectancy", "type": "scatter", "x": "gdp_per_capita", "y": "life_expectancy", "label": "country", "color": "continent"},
+        {"title": "Average life expectancy by continent", "type": "bar", "x": "continent", "y": "life_expectancy", "agg": "mean", "y_label": "Life expectancy"}
+      ]
+    },
+    "tips": {
+      "title": "Restaurant tips",
+      "fact_sql": "SELECT rowid AS bill_id, total_bill, tip, ROUND(tip * 100.0 / total_bill, 2) AS tip_pct, sex, smoker, day, time, size FROM tips",
+      "date": null,
+      "kpis": [
+        {"label": "Bills", "col": "bill_id", "agg": "count", "format": "int"},
+        {"label": "Revenue", "col": "total_bill", "agg": "sum", "format": "money"},
+        {"label": "Total tips", "col": "tip", "agg": "sum", "format": "money"},
+        {"label": "Avg tip %", "col": "tip_pct", "agg": "mean", "format": "pct"},
+        {"label": "Avg party size", "col": "size", "agg": "mean", "format": "num"}
+      ],
+      "slicers": ["day", "time", "sex", "smoker"],
+      "charts": [
+        {"title": "Revenue by day", "type": "bar", "x": "day", "y": "total_bill", "agg": "sum", "order": ["Thur", "Fri", "Sat", "Sun"], "y_label": "Revenue"},
+        {"title": "Average tip % by day", "type": "bar", "x": "day", "y": "tip_pct", "agg": "mean", "order": ["Thur", "Fri", "Sat", "Sun"], "y_label": "Tip %"},
+        {"title": "Lunch vs dinner revenue", "type": "pie", "x": "time", "y": "total_bill", "agg": "sum", "y_label": "Revenue"},
+        {"title": "Tip vs bill", "type": "scatter", "x": "total_bill", "y": "tip", "color": "time"},
+        {"title": "Average bill by party size", "type": "bar", "x": "size", "y": "total_bill", "agg": "mean", "y_label": "Average bill"},
+        {"title": "Tip % by sex and smoker", "type": "bar", "x": "sex", "y": "tip_pct", "agg": "mean", "color": "smoker", "y_label": "Tip %"}
+      ]
+    }
+  }
+}

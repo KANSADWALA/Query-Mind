@@ -23,6 +23,8 @@ from core.sources import (
     read_table_file, slugify, sqlite_url,
 )
 from ui import theme
+from ui.dashboard_view import dashboard_view
+from core.dashboard import DashboardStore
 
 st.set_page_config(page_title="QueryMind", page_icon=":material/database:", layout="wide")
 
@@ -190,6 +192,20 @@ def _manager_for(key: str) -> DatabaseManager | None:
     return mgr
 
 
+def linked_source_list() -> list[dict]:
+    """Extra databases included for this database, with labels: [{key, alias, label, db}]."""
+    ss = st.session_state
+    names = source_options()
+    out = []
+    for key in ss.linked_sel.get(ss.conv.source_key, []):
+        if key == ss.conv.source_key or key not in names:
+            continue
+        mgr = _manager_for(key)
+        if mgr is not None:
+            out.append({"key": key, "alias": alias_for(key, names[key]), "label": theme.short_name(names[key]), "db": mgr})
+    return out
+
+
 def linked_databases() -> dict[str, DatabaseManager]:
     """Extra databases the user included for cross-database questions, as {alias: manager}."""
     ss = st.session_state
@@ -268,8 +284,8 @@ def sidebar_database() -> None:
         names = {k: v for k, v in source_options().items() if k != ss.conv.source_key}
         current_sel = [k for k in ss.linked_sel.get(ss.conv.source_key, []) if k in names]
         with st.expander(f"Combine with other databases ({len(current_sel)})", icon=":material/join:"):
-            st.caption("Questions can then use data from these databases too. Each step queries one database, "
-                       "and the results are joined in a temporary table.")
+            st.caption("Chat questions can then use these databases too, and the Dashboard tab can show them side by "
+                       "side or merged on a field they share (such as country).")
             picked = st.multiselect("Also include", list(names), default=current_sel, format_func=names.get,
                                     placeholder="Pick databases…", label_visibility="collapsed")
             if picked != current_sel:
@@ -563,10 +579,23 @@ def render_result(turn: Turn, key: str) -> None:
                 st.caption("This result can't be drawn as that chart type. Try another or use the table.")
     with tabs[-1]:
         st.dataframe(df, width="stretch", hide_index=True)
-    c1, c2 = st.columns([5, 1], vertical_alignment="center")
+    can_pin = key != "workbench" and bool(turn.sql) and bool(st.session_state.conv.source_key)
+    c1, c2, c3 = st.columns([4, 1.2, 1], vertical_alignment="center")
     note = f"Showing the first {len(df):,} rows (row limit)." if turn.truncated else f"{turn.row_count:,} rows"
     c1.caption(note)
-    c2.download_button("CSV", df.to_csv(index=False).encode(), icon=":material/download:",
+    if can_pin:
+        store = st.session_state.setdefault("dash_store", DashboardStore())
+        source = st.session_state.conv.source_key
+        if store.is_pinned(source, turn.sql):
+            c2.button("Pinned", icon=":material/keep:", key=f"pin_{key}", width="stretch", disabled=True,
+                      help="On the Dashboard tab")
+        elif c2.button("Pin", icon=":material/push_pin:", key=f"pin_{key}", width="stretch",
+                       help="Add this answer to the Dashboard tab"):
+            chart = turn.chart or suggest_chart(df)
+            store.pin(source, turn.title or turn.question or "Pinned answer", turn.sql, chart, turn.question)
+            st.toast("Pinned to the dashboard", icon=":material/push_pin:")
+            st.rerun()
+    c3.download_button("CSV", df.to_csv(index=False).encode(), icon=":material/download:",
                        file_name=f"{(turn.title or 'result').replace(' ', '_')}.csv", key=f"dl_{key}", width="stretch")
 
 
@@ -858,11 +887,23 @@ def workbench_view() -> None:
 def main() -> None:
     init_state()
     sidebar()
-    views = {"chat": ":material/forum: Chat", "sql": ":material/terminal: SQL workbench"}
-    view = st.segmented_control("View", list(views), format_func=views.get, default="chat", key="view",
-                                label_visibility="collapsed") or "chat"
+    views = {"chat": ":material/forum: Chat", "dash": ":material/dashboard: Dashboard",
+             "sql": ":material/terminal: SQL workbench"}
+    # Remember the tab outside the widget: if a rerun interrupts the page before this control is drawn
+    # (e.g. switching database while a dashboard is loading), Streamlit drops its state and we restore it here.
+    ss = st.session_state
+    ss.setdefault("view_saved", "chat")
+    if ss.get("view") not in views:
+        ss["view"] = ss.view_saved
+    view = st.segmented_control("View", list(views), format_func=views.get, key="view", label_visibility="collapsed")
+    if view in views:
+        ss.view_saved = view
+    else:  # clicking the active tab again deselects it: stay where we are
+        view = ss.view_saved
     if view == "chat":
         chat_view()
+    elif view == "dash":
+        dashboard_view(get_agent, header, linked_source_list, source_options)
     else:
         workbench_view()
 

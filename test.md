@@ -1,6 +1,7 @@
 # QueryMind Test Plan
 
-A hands-on checklist for testing every feature of QueryMind with the six bundled datasets.
+A hands-on checklist for testing every feature of QueryMind (chat, multi-hop and cross-database reasoning,
+safety, charts, feedback learning, memory, dashboards and the Power BI export) with the six bundled datasets.
 
 **How to use it**
 
@@ -33,7 +34,7 @@ A hands-on checklist for testing every feature of QueryMind with the six bundled
 | 0.3 | Click **Test model** | "Connected to openai/gpt-oss-120b" | [ ] |
 | 0.4 | Rename `.env` temporarily and restart | Warning explains the missing key; chat box still usable; asking gives a clear "add an API key" message; SQL workbench still runs SQL. Rename it back afterwards. | [ ] |
 | 0.5 | Click a starter question | Status line appears, answer types out, table + chart + SQL shown | [ ] |
-| 0.6 | `python -m pytest -q` | 38 passed | [ ] |
+| 0.6 | `python -m pytest -q` | 43 passed | [ ] |
 
 ---
 
@@ -296,6 +297,7 @@ Connect **Chinook**, open **Combine with other databases**, and add the database
 | 17.6 | **Export** | Downloads a Markdown file with questions, answers and SQL | [ ] |
 | 17.7 | Red **Clear all chat history** → **Cancel** | Nothing deleted | [ ] |
 | 17.8 | Red **Clear all chat history** → **Delete all** | Toast "Deleted N saved chats"; current chat empty; Previous chats list gone; switching databases shows empty chats; 👍/👎 examples still in `data/feedback.json` | [ ] |
+| 17.9 | On the **Dashboard** tab, switch database in the sidebar, then click **Dashboard** again | Stays on the Dashboard (it used to jump to the Chat page) | [ ] |
 
 ---
 
@@ -325,6 +327,33 @@ Connect **Chinook**, open **Combine with other databases**, and add the database
 
 ---
 
+## 20. Dashboard and Power BI
+
+Open the **Dashboard** tab on **Chinook**.
+
+| # | Action | Expected | Pass |
+|---|---|---|---|
+| 20.1 | Open the tab | Title "Music store sales"; KPI cards: Revenue $2,328.60, Invoices 412, Customers 59, Avg invoice value $5.65, Tracks sold 2,240; six charts | [ ] |
+| 20.2 | Country slicer → USA | Revenue $523.06; every chart updates | [ ] |
+| 20.3 | Date range → Latest 12 months | KPI cards show "▲/▼ x% vs previous period" | [ ] |
+| 20.4 | Clear filters, then click the **Chile** bar in "Revenue by country" | Chip "Country: Chile"; Revenue $46.62, Customers 1; the country chart keeps all bars with Chile highlighted | [ ] |
+| 20.5 | Click the Chile bar again | Filter removed | [ ] |
+| 20.6 | Chat: ask 1.2, click **Pin**, go back to the Dashboard | "Pinned from chat" section shows the top-artists chart; **Unpin** removes it | [ ] |
+| 20.7 | Customize → add a chart (Bar, x = city, value = revenue, sum, top 10) → Save changes | New chart appears and survives a restart; **Reset to default** removes it | [ ] |
+| 20.8 | Customize → **Design with AI** | A new AI-designed dashboard appears (invalid parts are dropped automatically) | [ ] |
+| 20.9 | Switch to Titanic | "Titanic passenger survival": Passengers 891, Survivors 342, Survival rate 38.4% | [ ] |
+| 20.10 | Switch to Northwind | "Trading company sales": Revenue ≈ $448.4M, Orders ≈ 16.28K (first load takes a few seconds: 609k rows) | [ ] |
+| 20.11 | Upload any CSV as a new database, open the Dashboard | An automatic dashboard built from its columns | [ ] |
+| 20.12 | **Prepare Power BI pack** → Download; open in Power BI Desktop following POWERBI_README.md | Zip has fact.csv, dashboard.xlsx, measures.dax, load_fact.pq, fact_query.sql, POWERBI_README.md; the measures paste without errors and the rebuilt Revenue card shows $2,328.60 | [ ] |
+| 20.13 | Chinook connected; open the Dashboard; in **Compare with other databases** (top right) add Northwind and COVID-19 | Mode switches to Side by side automatically; **Side by side** shows three sections (Chinook, Northwind, COVID-19), each with its own KPI cards, slicers and charts | [ ] |
+| 20.14 | Shared Date range → Latest 12 months | Chinook and Northwind KPI cards show "vs previous period"; COVID (no dates) is unchanged | [ ] |
+| 20.15 | Switch to **Merged by a shared field** | Matching and measures shows fields Chinook `country`, Northwind `customer_country`, COVID `country`; KPI "Values in every database"; grouped bar with USA first; caption says bars are % of each database's own total | [ ] |
+| 20.16 | Compare as → Raw values; Filter shared values → USA, Canada, France | Real numbers; only those three countries; the scatter and coverage table update | [ ] |
+| 20.17 | Remove all linked databases except Titanic, open Merged | No shared field found; you can still pick columns manually | [ ] |
+| 20.18 | Click the already-selected mode (e.g. **Side by side**) again | The mode stays selected and the view doesn't change | [ ] |
+
+---
+
 ## Results summary
 
 | Section | Tests | Passed | Notes |
@@ -346,7 +375,8 @@ Connect **Chinook**, open **Combine with other databases**, and add the database
 | 14 Streaming | 4 | | |
 | 15 Feedback | 6 | | |
 | 16 Memory | 4 | | |
-| 17 Switching | 8 | | |
+| 17 Switching | 9 | | |
 | 18 Adding databases | 7 | | |
 | 19 Small talk | 5 | | |
-| **Total** | **143** | | |
+| 20 Dashboard and Power BI | 18 | | |
+| **Total** | **162** | | |

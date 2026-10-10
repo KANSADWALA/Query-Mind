@@ -369,3 +369,101 @@ def test_running_summary_memory(db):
     planner_history = llm.calls[1][1]["content"]
     assert "Summary of our earlier conversation" in planner_history and "bar charts" in planner_history
     assert Conversation.load(conv.save(Path(__import__("tempfile").mkdtemp()))).summary == conv.summary
+
+
+# ------------------------------------------------------------ dashboards
+def test_builtin_dashboards_compute(chinook_path):
+    from datetime import date
+    from core.dashboard import Filters, builtin_spec, chart_frame, kpi_value, load_fact, previous_period
+
+    db = DatabaseManager(sqlite_url(chinook_path))
+    spec = builtin_spec("chinook")
+    fact = load_fact(db, spec["fact_sql"], spec["date"])
+    assert len(fact) == 2240
+    kpis = {k["label"]: round(kpi_value(fact, k), 2) for k in spec["kpis"]}
+    assert kpis["Revenue"] == 2328.6 and kpis["Invoices"] == 412 and kpis["Customers"] == 59
+    usa_2012 = Filters(date_range=(date(2012, 1, 1), date(2012, 12, 31)), slicers={"country": ["USA"]}).apply(fact, "invoice_date")
+    assert round(kpi_value(usa_2012, spec["kpis"][0]), 2) == 127.98         # matches test.md 7.1
+    by_country = chart_frame(fact, spec["charts"][1])
+    assert by_country.iloc[0].tolist() == ["USA", 523.06] and len(by_country) == 10
+    assert previous_period((date(2013, 1, 1), date(2013, 12, 22)), (date(2009, 1, 1), date(2013, 12, 22)))[1] == date(2012, 12, 31)
+
+
+def test_every_builtin_dashboard_is_valid():
+    from core.charts import build_figure
+    from core.dashboard import builtin_spec, chart_frame, chart_spec_for_figure, load_fact
+
+    catalog = DatasetCatalog()
+    for ds in ["titanic", "tips", "covid_latest"]:
+        db = DatabaseManager(catalog.ensure(ds))
+        spec = builtin_spec(ds)
+        fact = load_fact(db, spec["fact_sql"], spec["date"])
+        for chart in spec["charts"]:
+            frame = chart_frame(fact, chart)
+            assert not frame.empty, (ds, chart["title"])
+            assert build_figure(frame, chart_spec_for_figure(chart, frame), chart["title"]) is not None
+
+
+def test_auto_and_ai_dashboard_specs(db, tmp_path):
+    from core.dashboard import DashboardStore, ai_spec, auto_spec
+
+    auto = auto_spec(db)
+    assert auto["kpis"] and auto["charts"] and auto["fact_sql"].startswith("SELECT")
+    llm = FakeLLM({"title": "AI", "fact_sql": "SELECT InvoiceId AS invoice_id, BillingCountry AS country, Total AS total FROM Invoice",
+                   "date": "nope", "kpis": [{"label": "Sales", "col": "total", "agg": "sum"}, {"label": "Bad", "col": "missing"}],
+                   "slicers": ["country", "ghost"], "charts": [{"title": "By country", "type": "bar", "x": "country", "y": "total"},
+                                                               {"title": "Broken", "type": "bar", "x": "nothing"}]})
+    spec = ai_spec(db, llm, "SQLite")
+    assert [k["label"] for k in spec["kpis"]] == ["Sales"] and spec["slicers"] == ["country"]
+    assert [c["title"] for c in spec["charts"]] == ["By country"] and spec["date"] is None
+    store = DashboardStore(tmp_path / "dash.json")
+    store.save_spec("dataset:chinook", spec)
+    store.pin("dataset:chinook", "Top", "SELECT 1", None, "q")
+    assert store.get("dataset:chinook")["spec"]["title"] == "AI" and store.is_pinned("dataset:chinook", "SELECT 1")
+
+
+def test_powerbi_export_pack(chinook_path):
+    import io
+    import zipfile
+
+    from core.dashboard import builtin_spec, chart_frame, dax_measures, export_powerbi, load_fact
+
+    spec = builtin_spec("chinook")
+    fact = load_fact(DatabaseManager(sqlite_url(chinook_path)), spec["fact_sql"], spec["date"])
+    pack = export_powerbi(spec, fact, {c["title"]: chart_frame(fact, c) for c in spec["charts"]},
+                          [{"KPI": "Revenue", "Value": 2328.6}], "Chinook", filtered=False)
+    names = set(zipfile.ZipFile(io.BytesIO(pack)).namelist())
+    assert names == {"fact.csv", "dashboard.xlsx", "measures.dax", "load_fact.pq", "fact_query.sql", "POWERBI_README.md"}
+    dax = dax_measures(spec)
+    assert "Invoices = DISTINCTCOUNT('Fact'[invoice_id])" in dax and "DIVIDE(" in dax
+    fact_csv = zipfile.ZipFile(io.BytesIO(pack)).read("fact.csv").decode()
+    assert fact_csv.count("\n") == 2241
+
+
+def test_multi_database_matching_and_merge():
+    import io
+    import zipfile
+
+    from core.dashboard import (builtin_spec, comparison_view, export_multi_powerbi, find_shared_fields, load_fact,
+                                merged_frame, normalize_key)
+
+    assert normalize_key("USA") == normalize_key("United States") == "united states"
+    assert normalize_key("Czech Republic") == normalize_key("Czechia") and normalize_key("UK") == "united kingdom"
+    cat = DatasetCatalog()
+    facts, specs = {}, {}
+    for ds in ["chinook", "covid_latest", "titanic"]:
+        specs[ds] = builtin_spec(ds)
+        facts[ds] = load_fact(DatabaseManager(cat.ensure(ds)), specs[ds]["fact_sql"], specs[ds]["date"])
+    found = find_shared_fields({k: facts[k] for k in ("chinook", "covid_latest")}, "chinook")
+    assert found["fields"] == {"chinook": "country", "covid_latest": "country"} and found["overlap"]["covid_latest"] == 1.0
+    assert find_shared_fields({k: facts[k] for k in ("chinook", "titanic")}, "chinook") == {}   # nothing in common
+    merged = merged_frame({k: facts[k] for k in ("chinook", "covid_latest")}, found["fields"],
+                          {"chinook": specs["chinook"]["kpis"][0], "covid_latest": specs["covid_latest"]["kpis"][2]},
+                          {"chinook": "Chinook", "covid_latest": "COVID"})
+    usa = merged[merged["shared_value"] == "USA"].iloc[0]
+    assert usa["Chinook: Revenue"] == 523.06 and usa["COVID: Total deaths"] > 1_000_000
+    view, mode = comparison_view(merged)
+    assert mode == "share" and view.iloc[0]["shared_value"] == "USA"          # $ vs deaths: scales differ -> % share
+    sections = [{"alias": k, "label": k.title(), "spec": specs[k], "fact": facts[k]} for k in ("chinook", "covid_latest")]
+    names = zipfile.ZipFile(io.BytesIO(export_multi_powerbi(sections, found, merged))).namelist()
+    assert {"fact_chinook.csv", "fact_covid_latest.csv", "shared_keys.csv", "merged_comparison.csv", "measures.dax"} <= set(names)
